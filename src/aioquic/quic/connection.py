@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Tuple
+import ipaddress
 
 from .. import tls
 from ..buffer import UINT_VAR_MAX, Buffer, BufferReadError, size_uint_var
@@ -34,6 +35,7 @@ from .packet import (
     pull_quic_transport_parameters,
     push_ack_frame,
     push_quic_transport_parameters,
+    pull_uniflow_frame,
 )
 from .packet_builder import (
     PACKET_MAX_SIZE,
@@ -351,6 +353,13 @@ class QuicConnection:
             0x1E: (self._handle_handshake_done_frame, EPOCHS("1")),
             0x30: (self._handle_datagram_frame, EPOCHS("01")),
             0x31: (self._handle_datagram_frame, EPOCHS("01")),
+            0x40: (self._handle_mp_new_connection_id_frame, EPOCHS("1")),
+            0x41: (self._handle_mp_retire_connection_id_frame, EPOCHS("1")),
+            0x42: (self._handle_mp_ack_frame, EPOCHS("1")),
+            0x43: (self._handle_mp_ack_frame, EPOCHS("1")),
+            0x44: (self._handle_add_address_frame, EPOCHS("1")),
+            0x45: (self._handle_remove_address, EPOCHS("1")),
+            0x46: (self._handle_uniflows_frame, EPOCHS("1")),
         }
 
     @property
@@ -1830,6 +1839,141 @@ class QuicConnection:
                 )
             )
 
+    def _handle_mp_new_connection_id_frame(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        """
+        Handle an MP_NEW_CONNECTION_ID frame
+        """
+        uniflow_id = buf.pull_uint_var()
+        sequence_number = buf.pull_uint_var()
+        retire_prior_to = buf.pull_uint_var()
+        length = buf.pull_uint8()
+        connection_id = buf.pull_bytes(length)
+        stateless_reset_token = buf.pull_bytes(16)
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_mp_new_connection_id_frame(
+                    connection_id=connection_id,
+                    uniflow_id=uniflow_id,
+                    retire_prior_to=retire_prior_to,
+                    sequence_number=sequence_number,
+                    stateless_reset_token=stateless_reset_token,
+                )
+            )
+        # Todo
+
+    def _handle_mp_retire_connection_id_frame(
+            self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        """
+        Handle an MP_RETIRE_CONNECTION_ID frame.
+        """
+        uniflow_id = buf.pull_uint_var()
+        sequence_number = buf.pull_uint_var()
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_mp_retire_connection_id_frame(uniflow_id, sequence_number)
+            )
+        # Todo
+
+    def _handle_mp_ack_frame(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        """
+        Handle an MP_ACK frame.
+        """
+        uniflow_id = buf.pull_uint_var()
+        ack_rangeset, ack_delay_encoded = pull_ack_frame(buf)
+        if frame_type == QuicFrameType.ACK_ECN:
+            buf.pull_uint_var()
+            buf.pull_uint_var()
+            buf.pull_uint_var()
+        ack_delay = (ack_delay_encoded << self._remote_ack_delay_exponent) / 1000000
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_mp_ack_frame(uniflow_id, ack_rangeset, ack_delay)
+            )
+
+        # Todo
+
+    def _handle_add_address_frame(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        """
+        Handle an ADD_ADDRESS frame
+        """
+        first_byte = buf.pull_uint8()
+
+        address_id = buf.pull_uint8()
+        sequence_number = buf.pull_uint_var()
+        interface_type = buf.pull_uint8()
+        ip_address = None
+        port = 443
+
+        # Fixme
+        if first_byte & 15 == 4:
+            ip_address_value = buf.pull_uint32()
+            ip_address = ipaddress.IPv4Address(ip_address_value)
+        else:
+            ip_address_value = buf.pull_bytes(16)
+            ip_address = ipaddress.IPv6Address(ip_address_value)
+
+        if first_byte & 16:
+            port = buf.pull_uint16()
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_add_address_frame(
+                    address_id=address_id,
+                    sequence_number=sequence_number,
+                    interface_type=interface_type,
+                    ip_address=str(ip_address),
+                    port=port,
+                )
+            )
+
+        # Todo
+
+    def _handle_remove_address(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        address_id = buf.pull_uint8()
+        sequence_number = buf.pull_uint_var()
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_remove_address_frame(address_id, sequence_number)
+            )
+
+        # Todo
+
+    def _handle_uniflows_frame(
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        sequence_number = sequence_number = buf.pull_uint_var()
+        receiving_uniflows, active_sending_uniflows = pull_uniflow_frame(buf)
+
+        # log frame
+        if self._quic_logger is not None:
+            context.quic_logger_frames.append(
+                self._quic_logger.encode_uniflows_frame(
+                    sequence_number=sequence_number,
+                    receiving_uniflows=receiving_uniflows,
+                    active_sending_uniflows=active_sending_uniflows,
+                )
+            )
+
+        # Todo
+
     def _on_ack_delivery(
         self, delivery: QuicDeliveryState, space: QuicPacketSpace, highest_acked: int
     ) -> None:
@@ -2038,6 +2182,7 @@ class QuicConnection:
             initial_max_streams_uni=self._local_max_streams_uni,
             max_ack_delay=25,
             max_datagram_frame_size=self._configuration.max_datagram_frame_size,
+            max_sending_uniflow_id=self._configuration.max_sending_uniflow_id,
             quantum_readiness=b"Q" * 1200
             if self._configuration.quantum_readiness_test
             else None,

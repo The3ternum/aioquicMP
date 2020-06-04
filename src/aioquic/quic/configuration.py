@@ -45,6 +45,8 @@ class QuicConfiguration:
     Per-stream flow control limit.
     """
 
+    max_sending_uniflow_id: int = 4
+
     quic_logger: Optional[QuicLogger] = None
     """
     The :class:`~aioquic.quic.logger.QuicLogger` instance to log events to.

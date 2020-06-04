@@ -181,6 +181,75 @@ class QuicLoggerTrace:
             "stream_type": "unidirectional" if is_unidirectional else "bidirectional",
         }
 
+    def encode_mp_new_connection_id_frame(
+        self,
+        connection_id: bytes,
+        uniflow_id: int,
+        retire_prior_to: int,
+        sequence_number: int,
+        stateless_reset_token: bytes,
+    ) -> Dict:
+        return {
+            "connection_id": hexdump(connection_id),
+            "frame_type": "mp_new_connection_id",
+            "uniflow_id": str(uniflow_id),
+            "length": len(connection_id),
+            "reset_token": hexdump(stateless_reset_token),
+            "retire_prior_to": str(retire_prior_to),
+            "sequence_number": str(sequence_number),
+        }
+
+    def encode_mp_retire_connection_id_frame(
+        self,
+        uniflow_id: int,
+        sequence_number: int,
+    ) -> Dict:
+        return {
+            "frame_type": "mp_retire_connection_id",
+            "uniflow_id": str(uniflow_id),
+            "sequence_number": str(sequence_number),
+        }
+
+    def encode_mp_ack_frame(self, uniflow_id: int, ranges: RangeSet, delay: float) -> Dict:
+        return {
+            "uniflow_id": str(uniflow_id),
+            "ack_delay": str(self.encode_time(delay)),
+            "acked_ranges": [[str(x.start), str(x.stop - 1)] for x in ranges],
+            "frame_type": "mp_ack",
+        }
+
+    def encode_add_address_frame(
+        self,
+        address_id: int,
+        sequence_number: int,
+        interface_type: int,
+        ip_address: str,
+        port: int,
+    ) -> Dict:
+        return {
+            "frame_type": "add_adress",
+            "address_id": str(address_id),
+            "sequence_number": str(sequence_number),
+            "interface_type": str(interface_type),
+            "ip_address": ip_address,
+            "port": str(port),
+        }
+
+    def encode_remove_address_frame(self, address_id: int, sequence_number: int) -> Dict:
+        return {
+            "frame_type": "remove address",
+            "address_id": str(address_id),
+            "sequence_number": str(sequence_number),
+        }
+
+    def encode_uniflows_frame(self, sequence_number: int, receiving_uniflows: List, active_sending_uniflows: List):
+        return {
+            "frame_type": "uniflows",
+            "sequence_number": str(sequence_number),
+            "receiving_uniflows": [{str(u["uniflow_id"]), str(u["local_address_id"])} for u in receiving_uniflows],
+            "active_sening_uniflows": [{str(u["uniflow_id"]), str(u["local_address_id"])} for u in active_sending_uniflows],
+        }
+
     def encode_time(self, seconds: float) -> int:
         """
         Convert a time to integer microseconds.

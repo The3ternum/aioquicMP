@@ -255,6 +255,7 @@ class QuicTransportParameters:
     preferred_address: Optional[QuicPreferredAddress] = None
     active_connection_id_limit: Optional[int] = None
     max_datagram_frame_size: Optional[int] = None
+    max_sending_uniflow_id: Optional[int] = None
     quantum_readiness: Optional[bytes] = None
 
 
@@ -275,6 +276,7 @@ PARAMS = {
     13: ("preferred_address", QuicPreferredAddress),
     14: ("active_connection_id_limit", int),
     32: ("max_datagram_frame_size", int),
+    64: ("max_sending_uniflow_id", int),
     3127: ("quantum_readiness", bytes),
 }
 
@@ -506,3 +508,31 @@ def push_ack_frame(buf: Buffer, rangeset: RangeSet, delay: int) -> int:
         buf.push_uint_var(r.stop - r.start - 1)
         start = r.start
     return ranges
+
+
+def pull_uniflow_frame(buf: Buffer) -> Tuple[list, list]:
+    rcvUni = buf.pull_uint_var()
+    sndUni = buf.pull_uint_var()
+    receiving_uniflows = []
+    active_sending_uniflows = []
+    for _ in range(rcvUni):
+        uniflow_id = buf.pull_uint_var()
+        local_adress_id = buf.pull_uint8()
+        receiving_uniflows.append({"uniflow_id": uniflow_id, "local_adress_id": local_adress_id})
+    for _ in range(sndUni):
+        uniflow_id = buf.pull_uint_var()
+        local_adress_id = buf.pull_uint8()
+        active_sending_uniflows.append({"uniflow_id": uniflow_id, "local_adress_id": local_adress_id})
+    return receiving_uniflows, active_sending_uniflows
+
+
+def push_uniflow_frame(buf: Buffer, receiving_uniflows: list, active_sending_uniflows: list) -> Tuple[int, int]:
+    rcvUni = len(receiving_uniflows)
+    sndUni = len(active_sending_uniflows)
+    for i in range(rcvUni):
+        buf.push_uint_var(receiving_uniflows[i]["uniflow_id"])
+        buf.push_uint8(receiving_uniflows[i]["local_adress_id"])
+    for i in range(sndUni):
+        buf.push_uint_var(active_sending_uniflows[i]["uniflow_id"])
+        buf.push_uint8(active_sending_uniflows[i]["local_adress_id"])
+    return rcvUni, sndUni
