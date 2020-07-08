@@ -24,6 +24,12 @@ aioquic
 .. |black| image:: https://img.shields.io/badge/code%20style-black-000000.svg
     :target: https://github.com/python/black
 
+``MultiPath`` implementation
+------------------------
+This repository implements the Mutlipath Extension for quic in aioquic
+The implementation is still in progress and follows the draft of Q. De Coninck
+and O. Bonaventure (https://datatracker.ietf.org/doc/draft-deconinck-quic-multipath/)
+
 What is ``aioquic``?
 --------------------
 
