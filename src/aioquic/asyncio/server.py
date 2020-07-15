@@ -23,17 +23,21 @@ class QuicServer(asyncio.DatagramProtocol):
     def __init__(
         self,
         *,
+        identity: str,
         configuration: QuicConfiguration,
         create_protocol: Callable = QuicConnectionProtocol,
+        protocols: Dict[bytes, QuicConnectionProtocol],
         session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
         session_ticket_handler: Optional[SessionTicketHandler] = None,
         stateless_retry: bool = False,
         stream_handler: Optional[QuicStreamHandler] = None,
     ) -> None:
+        self._identity = identity
+        self.count = 0
         self._configuration = configuration
         self._create_protocol = create_protocol
         self._loop = asyncio.get_event_loop()
-        self._protocols: Dict[bytes, QuicConnectionProtocol] = {}
+        self._protocols = protocols
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
         self._transport: Optional[asyncio.DatagramTransport] = None
@@ -52,9 +56,13 @@ class QuicServer(asyncio.DatagramProtocol):
         self._transport.close()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        print("server " + self._identity + " connection made")
         self._transport = cast(asyncio.DatagramTransport, transport)
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
+        count = self.count
+        self.count += 1
+        print("server " + self._identity + " datagram " + str(count) + " received")
         data = cast(bytes, data)
         buf = Buffer(data=data)
 
@@ -136,14 +144,17 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol._connection_terminated_handler = partial(
                 self._connection_terminated, protocol=protocol
             )
-
+            print("Server " + self._identity + " ", self._protocols.keys())
             self._protocols[header.destination_cid] = protocol
-            self._protocols[connection.host_cid] = protocol
+            # self._protocols[connection.host_cid] = protocol
+            self._protocols[connection._receiving_uniflows[0].cid] = protocol
 
         if protocol is not None:
             protocol.datagram_received(data, addr)
+        # print("server " + self._identity + " datagram " + str(count) + " ended")
 
     def _connection_id_issued(self, cid: bytes, protocol: QuicConnectionProtocol):
+        print("server " + self._identity + " cid " + str(cid))
         self._protocols[cid] = protocol
 
     def _connection_id_retired(
@@ -162,8 +173,10 @@ async def serve(
     host: str,
     port: int,
     *,
+    identity: str,
     configuration: QuicConfiguration,
     create_protocol: Callable = QuicConnectionProtocol,
+    protocols: Dict[bytes, QuicConnectionProtocol],
     session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
     session_ticket_handler: Optional[SessionTicketHandler] = None,
     stateless_retry: bool = False,
@@ -198,8 +211,10 @@ async def serve(
 
     _, protocol = await loop.create_datagram_endpoint(
         lambda: QuicServer(
+            identity=identity,
             configuration=configuration,
             create_protocol=create_protocol,
+            protocols=protocols,
             session_ticket_fetcher=session_ticket_fetcher,
             session_ticket_handler=session_ticket_handler,
             stateless_retry=stateless_retry,

@@ -186,68 +186,6 @@ END_STATES = frozenset(
 )
 
 
-class UniflowState(Enum):
-    UNUSED = 0
-    ACTIVE = 1
-
-
-class QuicReceivingUniflow:
-    def __init__(
-        self,
-        *,
-        uniflow_id,
-        source_address,
-        destination_address,
-        local_address_id,
-        is_first,
-        configuration: QuicConfiguration,
-    ) -> None:
-        self.uniflow_id = uniflow_id
-        self.cid_available: List[QuicConnectionId] = [
-            QuicConnectionId(
-                cid=os.urandom(configuration.connection_id_length),
-                sequence_number=0,
-                stateless_reset_token=os.urandom(16),
-                was_sent=is_first,
-            )
-        ]
-        self.cid: bytes = self.cid_available[0].cid
-        self.cid_seq: int = 1
-        self.active_connection_id_limit: int = 8
-        self.packet_number = 0
-        self.source_address = source_address
-        self.destination_address = destination_address
-        self.local_address_id = local_address_id
-
-
-class QuicSendingUniflow:
-    def __init__(
-        self,
-        *,
-        uniflow_id,
-        source_address,
-        destination_address,
-        local_address_id,
-        remote_address_id,
-        configuration: QuicConfiguration,
-    ) -> None:
-        self.uniflow_id = uniflow_id
-        self.cid: bytes = os.urandom(configuration.connection_id_length)
-        self.cid_seq: Optional[int] = None
-        self.cid_available: List[QuicConnectionId] = []
-        self.token: bytes = b""
-        self.active_connection_id_limit: int = 0
-        self.retire_connection_ids: List[int] = []
-        self.state = UniflowState.UNUSED
-        self.packet_number = 0
-        self.source_address = source_address
-        self.destination_address = destination_address
-        self.local_address_id = local_address_id
-        self.remote_address_id = remote_address_id
-        # Congestion controller
-        # Performance metrics
-
-
 class QuicConnection:
     """
     A QUIC connection.
@@ -297,25 +235,18 @@ class QuicConnection:
         self._events: Deque[events.QuicEvent] = deque()
         self._handshake_complete = False
         self._handshake_confirmed = False
-        self._receiving_uniflows: Dict[int, QuicReceivingUniflow] = {0: QuicReceivingUniflow(
-                uniflow_id=0,
-                source_address=None,
-                destination_address=None,
-                local_address_id=0,
-                is_first=True,
-                configuration=configuration
+        self._host_cids = [
+            QuicConnectionId(
+                cid=os.urandom(configuration.connection_id_length),
+                sequence_number=0,
+                stateless_reset_token=os.urandom(16),
+                was_sent=True,
             )
-        }
-        self._sending_uniflows: Dict[int, QuicSendingUniflow] = {0: QuicSendingUniflow(
-                uniflow_id=0,
-                source_address=None,
-                destination_address=None,
-                local_address_id=0,
-                remote_address_id=0,
-                configuration=configuration
-            )
-        }
+        ]
+        self.host_cid = self._host_cids[0].cid
+        self._host_cid_seq = 1
         self._local_ack_delay_exponent = 3
+        self._local_active_connection_id_limit = 8
         self._local_max_data = configuration.max_data
         self._local_max_data_sent = configuration.max_data
         self._local_max_data_used = 0
@@ -330,8 +261,13 @@ class QuicConnection:
         self._pacing_at: Optional[float] = None
         self._packet_number = 0
         self._parameters_received = False
+        self._peer_cid = os.urandom(configuration.connection_id_length)
+        self._peer_cid_seq: Optional[int] = None
+        self._peer_cid_available: List[QuicConnectionId] = []
+        self._peer_token = b""
         self._quic_logger: Optional[QuicLoggerTrace] = None
         self._remote_ack_delay_exponent = 3
+        self._remote_active_connection_id_limit = 0
         self._remote_idle_timeout = 0.0  # seconds
         self._remote_max_data = 0
         self._remote_max_data_used = 0
@@ -353,7 +289,7 @@ class QuicConnection:
 
         # logging
         if logger_connection_id is None:
-            logger_connection_id = self._sending_uniflows[0].cid
+            logger_connection_id = self._peer_cid
         self._logger = QuicConnectionAdapter(
             logger, {"id": dump_cid(logger_connection_id)}
         )
@@ -430,7 +366,7 @@ class QuicConnection:
     def configuration(self) -> QuicConfiguration:
         return self._configuration
 
-    def change_connection_id(self, uniflow_id: int) -> None:
+    def change_connection_id(self) -> None:
         """
         Switch to the next available connection ID and retire
         the previous one.
@@ -438,21 +374,19 @@ class QuicConnection:
         After calling this method call :meth:`datagrams_to_send` to retrieve data
         which needs to be sent.
         """
-
-        uniflow = self._sending_uniflows[uniflow_id]
-        if uniflow.cid_available:
+        if self._peer_cid_available:
             # retire previous CID
             self._logger.debug(
-                "Retiring CID %s (%d)", dump_cid(uniflow.cid), uniflow.cid_seq
+                "Retiring CID %s (%d)", dump_cid(self._peer_cid), self._peer_cid_seq
             )
-            uniflow.retire_connection_ids.append(uniflow.cid_seq)
+            self._retire_connection_ids.append(self._peer_cid_seq)
 
             # assign new CID
-            connection_id = uniflow.cid_available.pop(0)
-            uniflow.cid_seq = connection_id.sequence_number
-            uniflow.cid = connection_id.cid
+            connection_id = self._peer_cid_available.pop(0)
+            self._peer_cid_seq = connection_id.sequence_number
+            self._peer_cid = connection_id.cid
             self._logger.debug(
-                "Switching to CID %s (%d)", dump_cid(uniflow.cid), uniflow.cid_seq
+                "Switching to CID %s (%d)", dump_cid(self._peer_cid), self._peer_cid_seq
             )
 
     def close(
@@ -466,7 +400,6 @@ class QuicConnection:
 
         :param error_code: An error code indicating why the connection is
                            being closed.
-        :param frame_type: Optional: the type of the frame
         :param reason_phrase: A human-readable explanation of why the
                               connection is being closed.
         """
@@ -514,16 +447,13 @@ class QuicConnection:
         if self._state in END_STATES:
             return []
 
-        # TODO packet scheduling
-        selected_uniflow = self._sending_uniflows[0]
-
         # build datagrams
         builder = QuicPacketBuilder(
-            host_cid=self._receiving_uniflows[0].cid,
+            host_cid=self.host_cid,
             is_client=self._is_client,
-            packet_number=self._packet_number,  # TODO which packet number space?
-            peer_cid=selected_uniflow.cid,
-            peer_token=selected_uniflow.token,
+            packet_number=self._packet_number,
+            peer_cid=self._peer_cid,
+            peer_token=self._peer_token,
             quic_logger=self._quic_logger,
             spin_bit=self._spin_bit,
             version=self._version,
@@ -593,12 +523,12 @@ class QuicConnection:
                                 packet.packet_type
                             ),
                             "header": {
-                                "packet_number": str(packet.packet_number),  # TODO which packet number?
+                                "packet_number": str(packet.packet_number),
                                 "packet_size": packet.sent_bytes,
-                                "scid": dump_cid(self._receiving_uniflows[0].cid)
+                                "scid": dump_cid(self.host_cid)
                                 if is_long_header(packet.packet_type)
                                 else "",
-                                "dcid": dump_cid(selected_uniflow.cid),
+                                "dcid": dump_cid(self._peer_cid),
                             },
                             "frames": packet.quic_logger_frames,
                         },
@@ -724,11 +654,10 @@ class QuicConnection:
 
             # check destination CID matches
             destination_cid_seq: Optional[int] = None
-            for uniflow in self._receiving_uniflows.values():
-                for connection_id in uniflow.cid_available:
-                    if header.destination_cid == connection_id.cid:
-                        destination_cid_seq = connection_id.sequence_number
-                        break
+            for connection_id in self._host_cids:
+                if header.destination_cid == connection_id.cid:
+                    destination_cid_seq = connection_id.sequence_number
+                    break
             if self._is_client and destination_cid_seq is None:
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
@@ -794,11 +723,11 @@ class QuicConnection:
                 # calculate stateless retry integrity tag
                 integrity_tag = get_retry_integrity_tag(
                     buf.data_slice(start_off, buf.tell() - RETRY_INTEGRITY_TAG_SIZE),
-                    self._sending_uniflows[0].cid,
+                    self._peer_cid,
                 )
 
                 if (
-                    header.destination_cid == self._receiving_uniflows[0].cid
+                    header.destination_cid == self.host_cid
                     and header.integrity_tag == integrity_tag
                     and not self._stateless_retry_count
                 ):
@@ -816,9 +745,9 @@ class QuicConnection:
                             },
                         )
 
-                    self._original_connection_id = self._sending_uniflows[0].cid
-                    self._sending_uniflows[0].cid = header.source_cid
-                    self._sending_uniflows[0].token = header.token
+                    self._original_connection_id = self._peer_cid
+                    self._peer_cid = header.source_cid
+                    self._peer_token = header.token
                     self._stateless_retry_count += 1
                     self._logger.info("Performing stateless retry")
                     self._connect(now=now)
@@ -914,9 +843,9 @@ class QuicConnection:
                 self._discard_epoch(tls.Epoch.INITIAL)
 
             # update state
-            if self._sending_uniflows[0].cid_seq is None:
-                self._sending_uniflows[0].cid = header.source_cid
-                self._sending_uniflows[0].cid_seq = 0
+            if self._peer_cid_seq is None:
+                self._peer_cid = header.source_cid
+                self._peer_cid_seq = 0
 
             if self._state == QuicConnectionState.FIRSTFLIGHT:
                 self._set_state(QuicConnectionState.CONNECTED)
@@ -965,7 +894,7 @@ class QuicConnection:
             # handle migration
             if (
                 not self._is_client
-                and context.host_cid != self._receiving_uniflows[0].cid
+                and context.host_cid != self.host_cid
                 and epoch == tls.Epoch.ONE_RTT
             ):
                 self._logger.debug(
@@ -973,8 +902,8 @@ class QuicConnection:
                     dump_cid(context.host_cid),
                     destination_cid_seq,
                 )
-                self._receiving_uniflows[0].cid = context.host_cid
-                self.change_connection_id(0)
+                self.host_cid = context.host_cid
+                self.change_connection_id()
 
             # update network path
             if not network_path.is_validated and epoch == tls.Epoch.HANDSHAKE:
@@ -1110,7 +1039,7 @@ class QuicConnection:
         assert self._is_client
 
         self._close_at = now + self._configuration.idle_timeout
-        self._initialize(self._sending_uniflows[0].cid)
+        self._initialize(self._peer_cid)
 
         self.tls.handle_message(b"", self._crypto_buffers)
         self._push_crypto_data()
@@ -1422,7 +1351,7 @@ class QuicConnection:
                     self._handshake_done_pending = True
 
                 self._loss.is_client_without_1rtt = False
-                self._replenish_connection_ids(0)  # TODO for new uniflows too
+                self._replenish_connection_ids()
                 self._events.append(
                     events.HandshakeCompleted(
                         alpn_protocol=self.tls.alpn_negotiated,
@@ -1627,7 +1556,7 @@ class QuicConnection:
                 )
             )
 
-        self._sending_uniflows[0].cid_available.append(
+        self._peer_cid_available.append(
             QuicConnectionId(
                 cid=connection_id,
                 sequence_number=sequence_number,
@@ -1773,7 +1702,7 @@ class QuicConnection:
             )
 
         # find the connection ID by sequence number
-        for index, connection_id in enumerate(self._receiving_uniflows[0].cid_available):
+        for index, connection_id in enumerate(self._host_cids):
             if connection_id.sequence_number == sequence_number:
                 if connection_id.cid == context.host_cid:
                     raise QuicConnectionError(
@@ -1786,14 +1715,14 @@ class QuicConnection:
                     dump_cid(connection_id.cid),
                     connection_id.sequence_number,
                 )
-                del self._receiving_uniflows[0].cid_available[index]
+                del self._host_cids[index]
                 self._events.append(
                     events.ConnectionIdRetired(connection_id=connection_id.cid)
                 )
                 break
 
         # issue a new connection ID
-        self._replenish_connection_ids(0)
+        self._replenish_connection_ids()
 
     def _handle_stop_sending_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -1935,14 +1864,7 @@ class QuicConnection:
                     stateless_reset_token=stateless_reset_token,
                 )
             )
-
-        self._sending_uniflows[uniflow_id].cid_available.append(
-            QuicConnectionId(
-                cid=connection_id,
-                sequence_number=sequence_number,
-                stateless_reset_token=stateless_reset_token,
-            )
-        )
+        # Todo
 
     def _handle_mp_retire_connection_id_frame(
             self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -1958,29 +1880,7 @@ class QuicConnection:
             context.quic_logger_frames.append(
                 self._quic_logger.encode_mp_retire_connection_id_frame(uniflow_id, sequence_number)
             )
-
-        # find the connection ID by sequence number
-        for index, connection_id in enumerate(self._receiving_uniflows[uniflow_id].cid_available):
-            if connection_id.sequence_number == sequence_number:
-                if connection_id.cid == context.host_cid:
-                    raise QuicConnectionError(
-                        error_code=QuicErrorCode.PROTOCOL_VIOLATION,
-                        frame_type=frame_type,
-                        reason_phrase="Cannot retire current connection ID",
-                    )
-                self._logger.debug(
-                    "Peer retiring CID %s (%d)",
-                    dump_cid(connection_id.cid),
-                    connection_id.sequence_number,
-                )
-                del self._receiving_uniflows[uniflow_id].cid_available[index]
-                self._events.append(
-                    events.ConnectionIdRetired(connection_id=connection_id.cid)
-                )
-                break
-
-        # issue a new connection ID
-        self._replenish_connection_ids(uniflow_id)
+        # Todo
 
     def _handle_mp_ack_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2190,20 +2090,19 @@ class QuicConnection:
 
         return is_ack_eliciting, bool(is_probing)
 
-    def _replenish_connection_ids(self, uniflow_id: int) -> None:
+    def _replenish_connection_ids(self) -> None:
         """
         Generate new connection IDs.
         """
-        uniflow = self._receiving_uniflows[uniflow_id]
-        while len(uniflow.cid_available) < min(8, self._remote_active_connection_id_limit):
-            uniflow.cid_available.append(
+        while len(self._host_cids) < min(8, self._remote_active_connection_id_limit):
+            self._host_cids.append(
                 QuicConnectionId(
                     cid=os.urandom(self._configuration.connection_id_length),
-                    sequence_number=uniflow.cid_seq,
+                    sequence_number=self._host_cid_seq,
                     stateless_reset_token=os.urandom(16),
                 )
             )
-            uniflow.cid_seq += 1
+            self._host_cid_seq += 1
 
     def _push_crypto_data(self) -> None:
         for epoch, buf in self._crypto_buffers.items():
@@ -2274,7 +2173,7 @@ class QuicConnection:
     def _serialize_transport_parameters(self) -> bytes:
         quic_transport_parameters = QuicTransportParameters(
             ack_delay_exponent=self._local_ack_delay_exponent,
-            active_connection_id_limit=self._receiving_uniflows[0].active_connection_id_limit,
+            active_connection_id_limit=self._local_active_connection_id_limit,
             idle_timeout=int(self._configuration.idle_timeout * 1000),
             initial_max_data=self._local_max_data,
             initial_max_stream_data_bidi_local=self._local_max_stream_data_bidi_local,
@@ -2424,7 +2323,7 @@ class QuicConnection:
                     network_path.remote_challenge = None
 
                 # NEW_CONNECTION_ID
-                for connection_id in self._receiving_uniflows[0].cid_available:
+                for connection_id in self._host_cids:
                     if not connection_id.was_sent:
                         self._write_new_connection_id_frame(
                             builder=builder, connection_id=connection_id

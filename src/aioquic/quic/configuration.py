@@ -46,6 +46,9 @@ class QuicConfiguration:
     """
 
     max_sending_uniflow_id: int = 4
+    """
+    Connection-wide number of sending uniflows
+    """
 
     quic_logger: Optional[QuicLogger] = None
     """
@@ -64,6 +67,11 @@ class QuicConfiguration:
     The server name to send during the TLS handshake the Server Name Indication.
 
     .. note:: This is only used by clients.
+    """
+
+    local_ports: Optional[list] = None
+    """
+    The available ports of a host
     """
 
     session_ticket: Optional[SessionTicket] = None

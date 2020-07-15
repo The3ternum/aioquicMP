@@ -231,6 +231,7 @@ class HttpServerProtocol(QuicConnectionProtocol):
         self._http: Optional[HttpConnection] = None
 
     def http_event_received(self, event: H3Event) -> None:
+        print("http_event_received")
         if isinstance(event, HeadersReceived) and event.stream_id not in self._handlers:
             authority = None
             headers = []
@@ -323,6 +324,7 @@ class HttpServerProtocol(QuicConnectionProtocol):
             handler.http_event_received(event)
 
     def quic_event_received(self, event: QuicEvent) -> None:
+        print("Server quic event received")
         if isinstance(event, ProtocolNegotiated):
             if event.alpn_protocol.startswith("h3-"):
                 self._http = H3Connection(self._quic)
@@ -397,9 +399,9 @@ if __name__ == "__main__":
         help="listen on the specified address (defaults to ::)",
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=4433,
+        "--ports",
+        type=str,
+        default="4433 4444 4455",
         help="listen on the specified port (defaults to 4433)",
     )
     parser.add_argument(
@@ -434,6 +436,9 @@ if __name__ == "__main__":
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
 
+    # collect the ports
+    ports = args.ports.split(" ")
+
     # import ASGI application
     module_str, attr_str = args.app.split(":", maxsplit=1)
     module = importlib.import_module(module_str)
@@ -455,6 +460,7 @@ if __name__ == "__main__":
         alpn_protocols=H3_ALPN + H0_ALPN + ["siduck"],
         is_client=False,
         max_datagram_frame_size=65536,
+        local_ports=ports,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
     )
@@ -464,20 +470,25 @@ if __name__ == "__main__":
 
     ticket_store = SessionTicketStore()
 
+    protocols: Dict[bytes, QuicConnectionProtocol] = {}
+
     if uvloop is not None:
         uvloop.install()
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        serve(
-            args.host,
-            args.port,
-            configuration=configuration,
-            create_protocol=HttpServerProtocol,
-            session_ticket_fetcher=ticket_store.pop,
-            session_ticket_handler=ticket_store.add,
-            stateless_retry=args.stateless_retry,
+    for port in ports:
+        loop.run_until_complete(
+            serve(
+                args.host,
+                int(port),
+                identity=port,
+                configuration=configuration,
+                create_protocol=HttpServerProtocol,
+                protocols=protocols,
+                session_ticket_fetcher=ticket_store.pop,
+                session_ticket_handler=ticket_store.add,
+                stateless_retry=args.stateless_retry,
+            )
         )
-    )
     try:
         loop.run_forever()
     except KeyboardInterrupt:
