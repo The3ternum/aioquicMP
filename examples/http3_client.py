@@ -401,7 +401,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--local-port", type=int, default=0, help="local port to bind for connections",
     )
-
+    parser.add_argument(
+        "-m",
+        "--multipath",
+        type=int,
+        default=0,
+        help="Set the maximum number of sending uniflows",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -409,12 +415,17 @@ if __name__ == "__main__":
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
 
+    # get max number of sending uniflows
+    max_sending_uniflows_id = args.multipath
+
     if args.output_dir is not None and not os.path.isdir(args.output_dir):
         raise Exception("%s is not a directory" % args.output_dir)
 
     # prepare configuration
     configuration = QuicConfiguration(
-        is_client=True, alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN
+        is_client=True,
+        alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN,
+        max_sending_uniflow_id=max_sending_uniflows_id,
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)

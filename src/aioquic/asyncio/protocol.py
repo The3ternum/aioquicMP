@@ -183,6 +183,10 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
                 self._connection_id_issued_handler(event.connection_id)
             elif isinstance(event, events.ConnectionIdRetired):
                 self._connection_id_retired_handler(event.connection_id)
+            elif isinstance(event, events.MPConnectionIdIssued):
+                self._connection_id_issued_handler(event.connection_id)
+            elif isinstance(event, events.MPConnectionIdRetired):
+                self._connection_id_retired_handler(event.connection_id)
             elif isinstance(event, events.ConnectionTerminated):
                 self._connection_terminated_handler()
 

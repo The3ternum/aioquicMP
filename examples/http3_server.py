@@ -427,6 +427,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
+    parser.add_argument(
+        "-m",
+        "--multipath",
+        type=int,
+        default=0,
+        help="Set the maximum number of sending uniflows",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -448,6 +455,9 @@ if __name__ == "__main__":
     else:
         quic_logger = None
 
+    # get max number of sending uniflows
+    max_sending_uniflows_id = args.multipath
+
     # open SSL log file
     if args.secrets_log:
         secrets_log_file = open(args.secrets_log, "a")
@@ -461,6 +471,7 @@ if __name__ == "__main__":
         local_ports=ports,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
+        max_sending_uniflow_id=max_sending_uniflows_id,
     )
 
     # load SSL certificate and key
