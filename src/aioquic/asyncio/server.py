@@ -56,13 +56,13 @@ class QuicServer(asyncio.DatagramProtocol):
         self._transport.close()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        print("server " + self._identity + " connection made")
+        # print("server " + self._identity + " connection made")
         self._transport = cast(asyncio.DatagramTransport, transport)
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
         count = self.count
         self.count += 1
-        print("server " + self._identity + " datagram " + str(count) + " received")
+        # print("server " + self._identity + " datagram " + str(count) + " received")
         data = cast(bytes, data)
         buf = Buffer(data=data)
 
@@ -144,7 +144,7 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol._connection_terminated_handler = partial(
                 self._connection_terminated, protocol=protocol
             )
-            print("Server " + self._identity + " ", self._protocols.keys())
+            # print("Server " + self._identity + " ", self._protocols.keys())
             self._protocols[header.destination_cid] = protocol
             # self._protocols[connection.host_cid] = protocol
             self._protocols[connection._receiving_uniflows[0].cid] = protocol
@@ -154,7 +154,7 @@ class QuicServer(asyncio.DatagramProtocol):
         # print("server " + self._identity + " datagram " + str(count) + " ended")
 
     def _connection_id_issued(self, cid: bytes, protocol: QuicConnectionProtocol):
-        print("server " + self._identity + " cid " + str(cid))
+        # print("server " + self._identity + " cid " + str(cid))
         self._protocols[cid] = protocol
 
     def _connection_id_retired(

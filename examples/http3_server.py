@@ -231,7 +231,6 @@ class HttpServerProtocol(QuicConnectionProtocol):
         self._http: Optional[HttpConnection] = None
 
     def http_event_received(self, event: H3Event) -> None:
-        print("http_event_received")
         if isinstance(event, HeadersReceived) and event.stream_id not in self._handlers:
             authority = None
             headers = []
@@ -324,7 +323,6 @@ class HttpServerProtocol(QuicConnectionProtocol):
             handler.http_event_received(event)
 
     def quic_event_received(self, event: QuicEvent) -> None:
-        print("Server quic event received")
         if isinstance(event, ProtocolNegotiated):
             if event.alpn_protocol.startswith("h3-"):
                 self._http = H3Connection(self._quic)

@@ -297,7 +297,8 @@ class QuicConnection:
         self._events: Deque[events.QuicEvent] = deque()
         self._handshake_complete = False
         self._handshake_confirmed = False
-        self._receiving_uniflows: Dict[int, QuicReceivingUniflow] = {0: QuicReceivingUniflow(
+        self._receiving_uniflows: Dict[int, QuicReceivingUniflow] = {
+            0: QuicReceivingUniflow(
                 uniflow_id=0,
                 source_address=None,
                 destination_address=None,
@@ -306,7 +307,8 @@ class QuicConnection:
                 configuration=configuration
             )
         }
-        self._sending_uniflows: Dict[int, QuicSendingUniflow] = {0: QuicSendingUniflow(
+        self._sending_uniflows: Dict[int, QuicSendingUniflow] = {
+            0: QuicSendingUniflow(
                 uniflow_id=0,
                 source_address=None,
                 destination_address=None,
@@ -375,7 +377,7 @@ class QuicConnection:
         self._handshake_done_pending = False
         self._ping_pending: List[int] = []
         self._probe_pending = False
-        self._retire_connection_ids: List[int] = []
+        # self._retire_connection_ids: List[int] = []
         self._streams_blocked_pending = False
 
         # callbacks
@@ -1609,7 +1611,6 @@ class QuicConnection:
         """
         Handle a NEW_CONNECTION_ID frame.
         """
-        print("new cid")
         sequence_number = buf.pull_uint_var()
         retire_prior_to = buf.pull_uint_var()
         length = buf.pull_uint8()
@@ -2136,7 +2137,7 @@ class QuicConnection:
         Callback when a RETIRE_CONNECTION_ID frame is acknowledged or lost.
         """
         if delivery != QuicDeliveryState.ACKED:
-            self._retire_connection_ids.append(sequence_number)
+            self._sending_uniflows[0].retire_connection_ids.append(sequence_number)
 
     def _payload_received(
         self, context: QuicReceiveContext, plain: bytes
@@ -2431,8 +2432,8 @@ class QuicConnection:
                         )
 
                 # RETIRE_CONNECTION_ID
-                while self._retire_connection_ids:
-                    sequence_number = self._retire_connection_ids.pop(0)
+                while self._sending_uniflows[0].retire_connection_ids:
+                    sequence_number = self._sending_uniflows[0].retire_connection_ids.pop(0)
                     self._write_retire_connection_id_frame(
                         builder=builder, sequence_number=sequence_number
                     )
