@@ -16,7 +16,7 @@ aioquic
     :target: https://pypi.python.org/pypi/aioquic
 
 .. |tests| image:: https://github.com/aiortc/aioquic/workflows/tests/badge.svg
-    :target: https://github.com/aiortc/aioquic/actions
+    :target: https://github.com/The3ternum/aioquicMP/actions
 
 .. |codecov| image:: https://img.shields.io/codecov/c/github/aiortc/aioquic.svg
     :target: https://codecov.io/gh/aiortc/aioquic
