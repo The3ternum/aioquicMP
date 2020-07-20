@@ -103,9 +103,11 @@ class HighLevelTest(TestCase):
             configuration = QuicConfiguration(is_client=False)
             configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
         self.server = await serve(
+            identity=str(self.server_port),
             host=host,
             port=self.server_port,
             configuration=configuration,
+            protocols={},
             stream_handler=handle_stream,
             **kwargs
         )
@@ -322,7 +324,7 @@ class HighLevelTest(TestCase):
                 self.server_host, self.server_port, configuration=configuration
             ) as client:
                 await client.ping()
-                client.change_connection_id()
+                client.change_connection_id(0)
                 await client.ping()
 
         run(self.run_server())
