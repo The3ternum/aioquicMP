@@ -85,6 +85,8 @@ PING_FRAME_CAPACITY = 1
 RETIRE_CONNECTION_ID_CAPACITY = 1 + 8
 STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
+MP_NEW_CONNECTION_ID_FRAME_CAPACITY = 1 + 8 + 8 + 8 + 1 + 20 + 16
+MP_RETIRE_CONNECTION_ID_CAPACITY = 1 + 8 + 8
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -351,6 +353,10 @@ class QuicConnection:
         self._streams_blocked_bidi: List[QuicStream] = []
         self._streams_blocked_uni: List[QuicStream] = []
         self._version: Optional[int] = None
+
+        self._max_sending_uniflows_id = configuration.max_sending_uniflow_id
+        self._peer_mp_support = False
+        self._peer_max_sending_uniflows_id = 0
 
         # logging
         if logger_connection_id is None:
@@ -1433,6 +1439,7 @@ class QuicConnection:
                         session_resumed=self.tls.session_resumed,
                     )
                 )
+                self._create_additional_uniflows()
                 self._unblock_streams(is_unidirectional=False)
                 self._unblock_streams(is_unidirectional=True)
                 self._logger.info(
@@ -2148,6 +2155,29 @@ class QuicConnection:
         if delivery != QuicDeliveryState.ACKED:
             self._sending_uniflows[0].retire_connection_ids.append(sequence_number)
 
+    def _on_mp_new_connection_id_delivery(
+        self,
+        delivery: QuicDeliveryState,
+        connection_id: QuicConnectionId,
+        uniflow_id: int,
+    ) -> None:
+        """
+        Callback when a MP_NEW_CONNECTION_ID frame is acknowledged or lost.
+        """
+        if delivery != QuicDeliveryState.ACKED:
+            connection_id.was_sent = False
+
+    def _on_mp_retire_connection_id_delivery(
+        self, delivery: QuicDeliveryState, sequence_number: int, uniflow_id: int
+    ) -> None:
+        """
+        Callback when a MP_RETIRE_CONNECTION_ID frame is acknowledged or lost.
+        """
+        if delivery != QuicDeliveryState.ACKED:
+            self._sending_uniflows[uniflow_id].retire_connection_ids.append(
+                sequence_number
+            )
+
     def _payload_received(
         self, context: QuicReceiveContext, plain: bytes
     ) -> Tuple[bool, bool]:
@@ -2282,6 +2312,11 @@ class QuicConnection:
             value = getattr(quic_transport_parameters, "initial_" + param)
             if value is not None:
                 setattr(self, "_remote_" + param, value)
+        if quic_transport_parameters.max_sending_uniflow_id is not None:
+            self._peer_mp_support = True
+            self._peer_max_sending_uniflows_id = (
+                quic_transport_parameters.max_sending_uniflow_id
+            )
 
     def _serialize_transport_parameters(self) -> bytes:
         runiflow = self._receiving_uniflows[0]
@@ -2385,6 +2420,28 @@ class QuicConnection:
                 cipher_suite=cipher_suite, secret=secret, version=self._version
             )
 
+    def _create_additional_uniflows(self) -> None:
+        if self._peer_mp_support:
+            for i in range(1, self._peer_max_sending_uniflows_id + 1):
+                self._receiving_uniflows[i] = QuicReceivingUniflow(
+                    uniflow_id=i,
+                    source_address=None,
+                    destination_address=None,
+                    local_address_id=0,
+                    is_first=True,
+                    configuration=self.configuration,
+                )
+                self._replenish_connection_ids(i)
+            for i in range(1, self._max_sending_uniflows_id + 1):
+                self._sending_uniflows[i] = QuicSendingUniflow(
+                    uniflow_id=i,
+                    source_address=None,
+                    destination_address=None,
+                    local_address_id=0,
+                    remote_address_id=0,
+                    configuration=self.configuration,
+                )
+
     def _write_application(
         self, builder: QuicPacketBuilder, network_path: QuicNetworkPath, now: float
     ) -> None:
@@ -2451,6 +2508,26 @@ class QuicConnection:
                     self._write_retire_connection_id_frame(
                         builder=builder, sequence_number=sequence_number
                     )
+
+                # MP_NEW_CONNECTION_ID
+                for runiflow in self._receiving_uniflows.values():
+                    for connection_id in runiflow.cid_available:
+                        if not connection_id.was_sent:
+                            self._write_mp_new_connection_id_frame(
+                                builder=builder,
+                                connection_id=connection_id,
+                                uniflow_id=runiflow.uniflow_id,
+                            )
+
+                # MP_RETIRE_CONNECTION_ID
+                for suniflow in self._sending_uniflows.values():
+                    while suniflow.retire_connection_ids:
+                        sequence_number = suniflow.retire_connection_ids.pop(0)
+                        self._write_mp_retire_connection_id_frame(
+                            builder=builder,
+                            sequence_number=sequence_number,
+                            uniflow_id=suniflow.uniflow_id,
+                        )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:
@@ -2910,5 +2987,65 @@ class QuicConnection:
                 self._quic_logger.encode_streams_blocked_frame(
                     is_unidirectional=frame_type == QuicFrameType.STREAMS_BLOCKED_UNI,
                     limit=limit,
+                )
+            )
+
+    def _write_mp_new_connection_id_frame(
+        self,
+        builder: QuicPacketBuilder,
+        connection_id: QuicConnectionId,
+        uniflow_id: int,
+    ) -> None:
+        retire_prior_to = 0  # FIXME
+
+        buf = builder.start_frame(
+            QuicFrameType.MP_NEW_CONNECTION_ID,
+            capacity=MP_NEW_CONNECTION_ID_FRAME_CAPACITY,
+            handler=self._on_mp_new_connection_id_delivery,
+            handler_args=(connection_id, uniflow_id,),
+        )
+        buf.push_uint_var(uniflow_id)
+        buf.push_uint_var(connection_id.sequence_number)
+        buf.push_uint_var(retire_prior_to)
+        buf.push_uint8(len(connection_id.cid))
+        buf.push_bytes(connection_id.cid)
+        buf.push_bytes(connection_id.stateless_reset_token)
+
+        connection_id.was_sent = True
+        self._events.append(
+            events.MPConnectionIdIssued(
+                connection_id=connection_id.cid, uniflow_id=uniflow_id
+            )
+        )
+
+        # log frame
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_mp_new_connection_id_frame(
+                    connection_id=connection_id.cid,
+                    uniflow_id=uniflow_id,
+                    retire_prior_to=retire_prior_to,
+                    sequence_number=connection_id.sequence_number,
+                    stateless_reset_token=connection_id.stateless_reset_token,
+                )
+            )
+
+    def _write_mp_retire_connection_id_frame(
+        self, builder: QuicPacketBuilder, sequence_number: int, uniflow_id: int
+    ) -> None:
+        buf = builder.start_frame(
+            QuicFrameType.MP_RETIRE_CONNECTION_ID,
+            capacity=MP_RETIRE_CONNECTION_ID_CAPACITY,
+            handler=self._on_mp_retire_connection_id_delivery,
+            handler_args=(sequence_number, uniflow_id,),
+        )
+        buf.push_uint_var(uniflow_id)
+        buf.push_uint_var(sequence_number)
+
+        # log frame
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_mp_retire_connection_id_frame(
+                    uniflow_id=uniflow_id, sequence_number=sequence_number
                 )
             )

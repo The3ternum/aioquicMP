@@ -439,6 +439,13 @@ class QuicFrameType(IntEnum):
     HANDSHAKE_DONE = 0x1E
     DATAGRAM = 0x30
     DATAGRAM_WITH_LENGTH = 0x31
+    MP_NEW_CONNECTION_ID = 0x40
+    MP_RETIRE_CONNECTION_ID = 0x41
+    MP_ACK = 0x42
+    MP_ACK_ECN = 0x43
+    ADD_ADDRESS = 0x44
+    REMOVE_ADDRESS = 0x45
+    UNIFLOWS = 0x46
 
 
 NON_ACK_ELICITING_FRAME_TYPES = frozenset(
@@ -448,6 +455,8 @@ NON_ACK_ELICITING_FRAME_TYPES = frozenset(
         QuicFrameType.PADDING,
         QuicFrameType.TRANSPORT_CLOSE,
         QuicFrameType.APPLICATION_CLOSE,
+        QuicFrameType.MP_ACK,
+        QuicFrameType.MP_ACK_ECN,
     ]
 )
 NON_IN_FLIGHT_FRAME_TYPES = frozenset(
@@ -465,6 +474,7 @@ PROBING_FRAME_TYPES = frozenset(
         QuicFrameType.PATH_RESPONSE,
         QuicFrameType.PADDING,
         QuicFrameType.NEW_CONNECTION_ID,
+        QuicFrameType.MP_NEW_CONNECTION_ID,
     ]
 )
 

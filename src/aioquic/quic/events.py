@@ -110,3 +110,15 @@ class StreamReset(QuicEvent):
 
     stream_id: int
     "The ID of the stream that was reset."
+
+
+@dataclass
+class MPConnectionIdIssued(QuicEvent):
+    connection_id: bytes
+    uniflow_id: int
+
+
+@dataclass
+class MPConnectionIdRetired(QuicEvent):
+    connection_id: bytes
+    uniflow_id: int
