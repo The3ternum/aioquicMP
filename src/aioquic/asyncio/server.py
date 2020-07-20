@@ -60,7 +60,7 @@ class QuicServer(asyncio.DatagramProtocol):
         self._transport = cast(asyncio.DatagramTransport, transport)
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
-        count = self.count
+        # count = self.count
         self.count += 1
         # print("server " + self._identity + " datagram " + str(count) + " received")
         data = cast(bytes, data)

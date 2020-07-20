@@ -323,7 +323,7 @@ async def test_migration(server: Server, configuration: QuicConfiguration):
         await protocol.ping()
 
         # change connection ID and replace transport
-        protocol.change_connection_id()
+        protocol.change_connection_id(0)
         protocol._transport.close()
         await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 

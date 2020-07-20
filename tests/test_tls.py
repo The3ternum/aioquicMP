@@ -40,7 +40,7 @@ from aioquic.tls import (
     verify_certificate,
 )
 
-from .utils import (
+from tests.utils import (
     SERVER_CACERTFILE,
     SERVER_CERTFILE,
     SERVER_KEYFILE,

@@ -19,7 +19,7 @@ from aioquic.quic.packet import (
     push_quic_transport_parameters,
 )
 
-from .utils import load
+from tests.utils import load
 
 
 class PacketTest(TestCase):

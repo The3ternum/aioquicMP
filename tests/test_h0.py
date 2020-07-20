@@ -3,7 +3,7 @@ from unittest import TestCase
 from aioquic.h0.connection import H0_ALPN, H0Connection
 from aioquic.h3.events import DataReceived, HeadersReceived
 
-from .test_connection import client_and_server, transfer
+from tests.test_connection import client_and_server, transfer
 
 
 def h0_client_and_server():

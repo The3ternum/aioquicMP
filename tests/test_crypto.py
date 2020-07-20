@@ -11,7 +11,7 @@ from aioquic.quic.crypto import (
 from aioquic.quic.packet import PACKET_FIXED_BIT, QuicProtocolVersion
 from aioquic.tls import CipherSuite
 
-from .utils import SKIP_TESTS
+from tests.utils import SKIP_TESTS
 
 PROTOCOL_VERSION = QuicProtocolVersion.DRAFT_25
 

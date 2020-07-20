@@ -27,7 +27,7 @@ from aioquic.quic.packet import (
 from aioquic.quic.packet_builder import QuicDeliveryState, QuicPacketBuilder
 from aioquic.quic.recovery import QuicPacketPacer
 
-from .utils import (
+from tests.utils import (
     SERVER_CACERTFILE,
     SERVER_CERTFILE,
     SERVER_CERTFILE_WITH_CHAIN,
