@@ -26,7 +26,6 @@ from aioquic.quic.packet import (
 )
 from aioquic.quic.packet_builder import QuicDeliveryState, QuicPacketBuilder
 from aioquic.quic.recovery import QuicPacketPacer
-
 from tests.utils import (
     SERVER_CACERTFILE,
     SERVER_CERTFILE,
@@ -199,10 +198,12 @@ class QuicConnectionTest(TestCase):
 
             # check each endpoint has available connection IDs for the peer
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
             )
             self.assertEqual(
-                sequence_numbers(server._sending_uniflows[0].cid_available), [1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(server._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
             )
 
             # client closes the connection
@@ -316,7 +317,8 @@ class QuicConnectionTest(TestCase):
         now = 1.1
         server.receive_datagram(items[0][0], CLIENT_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1066])  # 4 bytes added for new transport param
+        self.assertEqual(datagram_sizes(items), [1280, 1066])
+        # 4 bytes added to 1062 for new transport param
         self.assertEqual(server.get_timer(), 2.1)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
@@ -377,7 +379,8 @@ class QuicConnectionTest(TestCase):
         now = 0.1
         server.receive_datagram(items[0][0], CLIENT_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1066])  # 4 bytes added for new transport param
+        self.assertEqual(datagram_sizes(items), [1280, 1066])
+        # 4 bytes added to 1062 for new transport param
         self.assertEqual(server.get_timer(), 1.1)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
@@ -413,7 +416,8 @@ class QuicConnectionTest(TestCase):
         now = server.get_timer()
         server.handle_timer(now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 858])  # 4 bytes added for new transport param
+        self.assertEqual(datagram_sizes(items), [1280, 858])
+        # 4 bytes added to 854 for new transport param
         self.assertAlmostEqual(server.get_timer(), 3.1)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 3)
@@ -470,7 +474,8 @@ class QuicConnectionTest(TestCase):
         now = 0.1
         server.receive_datagram(items[0][0], CLIENT_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1066])  # 4 bytes added for new transport param
+        self.assertEqual(datagram_sizes(items), [1280, 1066])
+        # 4 bytes added to 1062 for new transport param
         self.assertEqual(server.get_timer(), 1.1)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
@@ -606,39 +611,45 @@ class QuicConnectionTest(TestCase):
     def test_change_connection_id(self):
         with client_and_server() as (client, server):
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
             )
 
             # the client changes connection ID
             client.change_connection_id(0)
             self.assertEqual(transfer(client, server), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7],
             )
 
             # the server provides a new connection ID
             self.assertEqual(transfer(server, client), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7, 8]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7, 8],
             )
 
     def test_change_connection_id_retransmit_new_connection_id(self):
         with client_and_server() as (client, server):
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
             )
 
             # the client changes connection ID
             client.change_connection_id(0)
             self.assertEqual(transfer(client, server), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7],
             )
 
             # the server provides a new connection ID, NEW_CONNECTION_ID is lost
             self.assertEqual(drop(server), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7],
             )
 
             # NEW_CONNECTION_ID is retransmitted
@@ -647,20 +658,23 @@ class QuicConnectionTest(TestCase):
             )
             self.assertEqual(transfer(server, client), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7, 8]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7, 8],
             )
 
     def test_change_connection_id_retransmit_retire_connection_id(self):
         with client_and_server() as (client, server):
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
             )
 
             # the client changes connection ID, RETIRE_CONNECTION_ID is lost
             client.change_connection_id(0)
             self.assertEqual(drop(client), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7],
             )
 
             # RETIRE_CONNECTION_ID is retransmitted
@@ -670,7 +684,8 @@ class QuicConnectionTest(TestCase):
             # the server provides a new connection ID
             self.assertEqual(transfer(server, client), 1)
             self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available), [2, 3, 4, 5, 6, 7, 8]
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7, 8],
             )
 
     def test_get_next_available_stream_id(self):
@@ -808,7 +823,9 @@ class QuicConnectionTest(TestCase):
             version=client._version,
         )
         crypto = CryptoPair()
-        crypto.setup_initial(client._sending_uniflows[0].cid, is_client=False, version=client._version)
+        crypto.setup_initial(
+            client._sending_uniflows[0].cid, is_client=False, version=client._version
+        )
         crypto.encrypt_packet_real = crypto.encrypt_packet
 
         def encrypt_packet(plain_header, plain_payload, packet_number):
@@ -846,7 +863,9 @@ class QuicConnectionTest(TestCase):
             version=0xFF000011,  # DRAFT_16
         )
         crypto = CryptoPair()
-        crypto.setup_initial(client._sending_uniflows[0].cid, is_client=False, version=client._version)
+        crypto.setup_initial(
+            client._sending_uniflows[0].cid, is_client=False, version=client._version
+        )
         builder.start_packet(PACKET_TYPE_INITIAL, crypto)
         buf = builder.start_frame(QuicFrameType.PADDING)
         buf.push_bytes(bytes(builder.remaining_flight_space))
@@ -1277,7 +1296,8 @@ class QuicConnectionTest(TestCase):
     def test_handle_retire_connection_id_frame(self):
         with client_and_server() as (client, server):
             self.assertEqual(
-                sequence_numbers(client._receiving_uniflows[0].cid_available), [0, 1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._receiving_uniflows[0].cid_available),
+                [0, 1, 2, 3, 4, 5, 6, 7],
             )
 
             # client receives RETIRE_CONNECTION_ID
@@ -1287,13 +1307,15 @@ class QuicConnectionTest(TestCase):
                 Buffer(data=b"\x02"),
             )
             self.assertEqual(
-                sequence_numbers(client._receiving_uniflows[0].cid_available), [0, 1, 3, 4, 5, 6, 7, 8]
+                sequence_numbers(client._receiving_uniflows[0].cid_available),
+                [0, 1, 3, 4, 5, 6, 7, 8],
             )
 
     def test_handle_retire_connection_id_frame_current_cid(self):
         with client_and_server() as (client, server):
             self.assertEqual(
-                sequence_numbers(client._receiving_uniflows[0].cid_available), [0, 1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._receiving_uniflows[0].cid_available),
+                [0, 1, 2, 3, 4, 5, 6, 7],
             )
 
             # client receives RETIRE_CONNECTION_ID for the current CID
@@ -1311,7 +1333,8 @@ class QuicConnectionTest(TestCase):
                 cm.exception.reason_phrase, "Cannot retire current connection ID"
             )
             self.assertEqual(
-                sequence_numbers(client._receiving_uniflows[0].cid_available), [0, 1, 2, 3, 4, 5, 6, 7]
+                sequence_numbers(client._receiving_uniflows[0].cid_available),
+                [0, 1, 2, 3, 4, 5, 6, 7],
             )
 
     def test_handle_stop_sending_frame(self):

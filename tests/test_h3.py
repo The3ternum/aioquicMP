@@ -16,7 +16,6 @@ from aioquic.h3.exceptions import NoAvailablePushIDError
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import StreamDataReceived
 from aioquic.quic.logger import QuicLogger
-
 from tests.test_connection import client_and_server, transfer
 
 

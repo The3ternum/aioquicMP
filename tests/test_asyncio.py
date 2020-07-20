@@ -12,7 +12,6 @@ from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.asyncio.server import serve
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.logger import QuicLogger
-
 from tests.utils import (
     SERVER_CACERTFILE,
     SERVER_CERTFILE,

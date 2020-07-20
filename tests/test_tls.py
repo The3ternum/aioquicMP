@@ -39,7 +39,6 @@ from aioquic.tls import (
     push_server_hello,
     verify_certificate,
 )
-
 from tests.utils import (
     SERVER_CACERTFILE,
     SERVER_CERTFILE,

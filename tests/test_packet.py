@@ -18,7 +18,6 @@ from aioquic.quic.packet import (
     push_quic_preferred_address,
     push_quic_transport_parameters,
 )
-
 from tests.utils import load
 
 

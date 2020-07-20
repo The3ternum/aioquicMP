@@ -209,7 +209,7 @@ class QuicLoggerTrace:
         }
 
     def encode_mp_ack_frame(
-            self, uniflow_id: int, ranges: RangeSet, delay: float
+        self, uniflow_id: int, ranges: RangeSet, delay: float
     ) -> Dict:
         return {
             "uniflow_id": str(uniflow_id),
@@ -236,7 +236,7 @@ class QuicLoggerTrace:
         }
 
     def encode_remove_address_frame(
-            self, address_id: int, sequence_number: int
+        self, address_id: int, sequence_number: int
     ) -> Dict:
         return {
             "frame_type": "remove address",
@@ -245,16 +245,22 @@ class QuicLoggerTrace:
         }
 
     def encode_uniflows_frame(
-            self,
-            sequence_number: int,
-            receiving_uniflows: List,
-            active_sending_uniflows: List
+        self,
+        sequence_number: int,
+        receiving_uniflows: List,
+        active_sending_uniflows: List,
     ) -> Dict:
         return {
             "frame_type": "uniflows",
             "sequence_number": str(sequence_number),
-            "receiving_uniflows": [{str(u["uniflow_id"]), str(u["local_address_id"])} for u in receiving_uniflows],
-            "active_sening_uniflows": [{str(u["uniflow_id"]), str(u["local_address_id"])} for u in active_sending_uniflows],
+            "receiving_uniflows": [
+                {str(u["uniflow_id"]), str(u["local_address_id"])}
+                for u in receiving_uniflows
+            ],
+            "active_sening_uniflows": [
+                {str(u["uniflow_id"]), str(u["local_address_id"])}
+                for u in active_sending_uniflows
+            ],
         }
 
     def encode_time(self, seconds: float) -> int:

@@ -2,7 +2,6 @@ import asyncio
 from unittest import TestCase
 
 from aioquic.asyncio.compat import _asynccontextmanager
-
 from tests.utils import run
 
 

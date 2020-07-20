@@ -5,7 +5,6 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Tuple
-import ipaddress
 
 from .. import tls
 from ..buffer import UINT_VAR_MAX, Buffer, BufferReadError, size_uint_var
@@ -33,9 +32,9 @@ from .packet import (
     pull_ack_frame,
     pull_quic_header,
     pull_quic_transport_parameters,
+    pull_uniflow_frame,
     push_ack_frame,
     push_quic_transport_parameters,
-    pull_uniflow_frame,
 )
 from .packet_builder import (
     PACKET_MAX_SIZE,
@@ -304,7 +303,7 @@ class QuicConnection:
                 destination_address=None,
                 local_address_id=0,
                 is_first=True,
-                configuration=configuration
+                configuration=configuration,
             )
         }
         self._sending_uniflows: Dict[int, QuicSendingUniflow] = {
@@ -314,7 +313,7 @@ class QuicConnection:
                 destination_address=None,
                 local_address_id=0,
                 remote_address_id=0,
-                configuration=configuration
+                configuration=configuration,
             )
         }
         self._local_ack_delay_exponent = 3
@@ -523,7 +522,8 @@ class QuicConnection:
         builder = QuicPacketBuilder(
             host_cid=self._receiving_uniflows[0].cid,
             is_client=self._is_client,
-            packet_number=self._packet_number,  # TODO which packet number space?
+            packet_number=self._packet_number,
+            # TODO which packet number space?
             peer_cid=selected_uniflow.cid,
             peer_token=selected_uniflow.token,
             quic_logger=self._quic_logger,
@@ -595,7 +595,8 @@ class QuicConnection:
                                 packet.packet_type
                             ),
                             "header": {
-                                "packet_number": str(packet.packet_number),  # TODO which packet number?
+                                "packet_number": str(packet.packet_number),
+                                # TODO which packet number?
                                 "packet_size": packet.sent_bytes,
                                 "scid": dump_cid(self._receiving_uniflows[0].cid)
                                 if is_long_header(packet.packet_type)
@@ -1424,7 +1425,7 @@ class QuicConnection:
                     self._handshake_done_pending = True
 
                 self._loss.is_client_without_1rtt = False
-                self._replenish_connection_ids(0)  # TODO for new uniflows too
+                self._replenish_connection_ids(0)
                 self._events.append(
                     events.HandshakeCompleted(
                         alpn_protocol=self.tls.alpn_negotiated,
@@ -1774,7 +1775,8 @@ class QuicConnection:
             )
 
         # find the connection ID by sequence number
-        for index, connection_id in enumerate(self._receiving_uniflows[0].cid_available):
+        runiflow = self._receiving_uniflows[0]
+        for index, connection_id in enumerate(runiflow.cid_available):
             if connection_id.sequence_number == sequence_number:
                 if connection_id.cid == context.host_cid:
                     raise QuicConnectionError(
@@ -1946,7 +1948,7 @@ class QuicConnection:
         )
 
     def _handle_mp_retire_connection_id_frame(
-            self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+        self, context: QuicReceiveContext, frame_type: int, buf: Buffer
     ) -> None:
         """
         Handle an MP_RETIRE_CONNECTION_ID frame.
@@ -1957,11 +1959,14 @@ class QuicConnection:
         # log frame
         if self._quic_logger is not None:
             context.quic_logger_frames.append(
-                self._quic_logger.encode_mp_retire_connection_id_frame(uniflow_id, sequence_number)
+                self._quic_logger.encode_mp_retire_connection_id_frame(
+                    uniflow_id, sequence_number
+                )
             )
 
         # find the connection ID by sequence number
-        for index, connection_id in enumerate(self._receiving_uniflows[uniflow_id].cid_available):
+        runiflow = self._receiving_uniflows[uniflow_id]
+        for index, connection_id in enumerate(runiflow.cid_available):
             if connection_id.sequence_number == sequence_number:
                 if connection_id.cid == context.host_cid:
                     raise QuicConnectionError(
@@ -2000,7 +2005,9 @@ class QuicConnection:
         # log frame
         if self._quic_logger is not None:
             context.quic_logger_frames.append(
-                self._quic_logger.encode_mp_ack_frame(uniflow_id, ack_rangeset, ack_delay)
+                self._quic_logger.encode_mp_ack_frame(
+                    uniflow_id, ack_rangeset, ack_delay
+                )
             )
 
         # Todo
@@ -2020,12 +2027,12 @@ class QuicConnection:
         port = 443
 
         # Fixme
-        if first_byte & 15 == 4:
-            ip_address_value = buf.pull_uint32()
-            ip_address = ipaddress.IPv4Address(ip_address_value)
-        else:
-            ip_address_value = buf.pull_bytes(16)
-            ip_address = ipaddress.IPv6Address(ip_address_value)
+        # if first_byte & 15 == 4:
+        #     ipv4_address_value = buf.pull_uint32()
+        #     ip_address = ipaddress.IPv4Address(ipv4_address_value)
+        # else:
+        #     ipv6_address_value = buf.pull_bytes(16)
+        #     ip_address = ipaddress.IPv6Address(ipv6_address_value)
 
         if first_byte & 16:
             port = buf.pull_uint16()
@@ -2053,7 +2060,9 @@ class QuicConnection:
         # log frame
         if self._quic_logger is not None:
             context.quic_logger_frames.append(
-                self._quic_logger.encode_remove_address_frame(address_id, sequence_number)
+                self._quic_logger.encode_remove_address_frame(
+                    address_id, sequence_number
+                )
             )
 
         # Todo
@@ -2196,7 +2205,9 @@ class QuicConnection:
         Generate new connection IDs.
         """
         uniflow = self._receiving_uniflows[uniflow_id]
-        while len(uniflow.cid_available) < min(8, self._remote_active_connection_id_limit):
+        while len(uniflow.cid_available) < min(
+            8, self._remote_active_connection_id_limit
+        ):
             uniflow.cid_available.append(
                 QuicConnectionId(
                     cid=os.urandom(self._configuration.connection_id_length),
@@ -2273,9 +2284,10 @@ class QuicConnection:
                 setattr(self, "_remote_" + param, value)
 
     def _serialize_transport_parameters(self) -> bytes:
+        runiflow = self._receiving_uniflows[0]
         quic_transport_parameters = QuicTransportParameters(
             ack_delay_exponent=self._local_ack_delay_exponent,
-            active_connection_id_limit=self._receiving_uniflows[0].active_connection_id_limit,
+            active_connection_id_limit=runiflow.active_connection_id_limit,
             idle_timeout=int(self._configuration.idle_timeout * 1000),
             initial_max_data=self._local_max_data,
             initial_max_stream_data_bidi_local=self._local_max_stream_data_bidi_local,
@@ -2425,15 +2437,17 @@ class QuicConnection:
                     network_path.remote_challenge = None
 
                 # NEW_CONNECTION_ID
-                for connection_id in self._receiving_uniflows[0].cid_available:
+                riuniflow = self._receiving_uniflows[0]
+                for connection_id in riuniflow.cid_available:
                     if not connection_id.was_sent:
                         self._write_new_connection_id_frame(
                             builder=builder, connection_id=connection_id
                         )
 
                 # RETIRE_CONNECTION_ID
-                while self._sending_uniflows[0].retire_connection_ids:
-                    sequence_number = self._sending_uniflows[0].retire_connection_ids.pop(0)
+                siuniflow = self._sending_uniflows[0]
+                while siuniflow.retire_connection_ids:
+                    sequence_number = siuniflow.retire_connection_ids.pop(0)
                     self._write_retire_connection_id_frame(
                         builder=builder, sequence_number=sequence_number
                     )
