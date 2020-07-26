@@ -1953,6 +1953,10 @@ class QuicConnection:
                 stateless_reset_token=stateless_reset_token,
             )
         )
+        if self._sending_uniflows[uniflow_id].cid_seq is None:
+            cid = self._sending_uniflows[uniflow_id].cid_available.pop(0)
+            self._sending_uniflows[uniflow_id].cid = cid.cid
+            self._sending_uniflows[uniflow_id].cid_seq = cid.sequence_number
 
     def _handle_mp_retire_connection_id_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2428,7 +2432,7 @@ class QuicConnection:
                     source_address=None,
                     destination_address=None,
                     local_address_id=0,
-                    is_first=True,
+                    is_first=False,
                     configuration=self.configuration,
                 )
                 self._replenish_connection_ids(i)
@@ -2511,23 +2515,25 @@ class QuicConnection:
 
                 # MP_NEW_CONNECTION_ID
                 for runiflow in self._receiving_uniflows.values():
-                    for connection_id in runiflow.cid_available:
-                        if not connection_id.was_sent:
-                            self._write_mp_new_connection_id_frame(
-                                builder=builder,
-                                connection_id=connection_id,
-                                uniflow_id=runiflow.uniflow_id,
-                            )
+                    if runiflow.uniflow_id != 0:
+                        for connection_id in runiflow.cid_available:
+                            if not connection_id.was_sent:
+                                self._write_mp_new_connection_id_frame(
+                                    builder=builder,
+                                    connection_id=connection_id,
+                                    uniflow_id=runiflow.uniflow_id,
+                                )
 
                 # MP_RETIRE_CONNECTION_ID
                 for suniflow in self._sending_uniflows.values():
-                    while suniflow.retire_connection_ids:
-                        sequence_number = suniflow.retire_connection_ids.pop(0)
-                        self._write_mp_retire_connection_id_frame(
-                            builder=builder,
-                            sequence_number=sequence_number,
-                            uniflow_id=suniflow.uniflow_id,
-                        )
+                    if suniflow.uniflow_id != 0:
+                        while suniflow.retire_connection_ids:
+                            sequence_number = suniflow.retire_connection_ids.pop(0)
+                            self._write_mp_retire_connection_id_frame(
+                                builder=builder,
+                                sequence_number=sequence_number,
+                                uniflow_id=suniflow.uniflow_id,
+                            )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:

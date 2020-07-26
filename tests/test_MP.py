@@ -75,7 +75,6 @@ def client_and_server(
     client_configuration = QuicConfiguration(
         is_client=True,
         quic_logger=QuicLogger(),
-        max_sending_uniflow_id=1,
         **client_options
     )
     client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
@@ -88,7 +87,6 @@ def client_and_server(
     server_configuration = QuicConfiguration(
         is_client=False,
         quic_logger=QuicLogger(),
-        max_sending_uniflow_id=1,
         **server_options
     )
     server_configuration.load_cert_chain(server_certfile, server_keyfile)
@@ -162,10 +160,13 @@ class QuicMPConnectionTest(TestCase):
         self.assertEqual(event.alpn_protocol, alpn_protocol)
         self.assertEqual(event.early_data_accepted, False)
         self.assertEqual(event.session_resumed, False)
+        # CID_seq 0 is implicitly communicated for initial uniflow
         for i in range(7):
             self.assertEqual(type(client.next_event()), events.ConnectionIdIssued)
-        for i in range(7):
-            self.assertEqual(type(client.next_event()), events.MPConnectionIdIssued)
+        # CID_seq 0 is explicitly communicated for other uniflows
+        for j in range(1, len(client._receiving_uniflows)):
+            for i in range(8):
+                self.assertEqual(type(client.next_event()), events.MPConnectionIdIssued)
         self.assertIsNone(client.next_event())
 
         event = server.next_event()
@@ -174,23 +175,32 @@ class QuicMPConnectionTest(TestCase):
         event = server.next_event()
         self.assertEqual(type(event), events.HandshakeCompleted)
         self.assertEqual(event.alpn_protocol, alpn_protocol)
+        # CID_seq 0 is implicitly communicated for initial uniflow
         for i in range(7):
             self.assertEqual(type(server.next_event()), events.ConnectionIdIssued)
-        for i in range(7):
-            self.assertEqual(type(server.next_event()), events.MPConnectionIdIssued)
+        # CID_seq 0 is explicitly communicated for other uniflows
+        for j in range(1, len(server._receiving_uniflows)):
+            for i in range(8):
+                self.assertEqual(type(server.next_event()), events.MPConnectionIdIssued)
         self.assertIsNone(server.next_event())
 
     def test_connect(self):
-        with client_and_server() as (client, server):
+        client_msui = 1
+        server_msui = 1
+        with client_and_server(
+            client_options={"max_sending_uniflow_id": client_msui},
+            server_options={"max_sending_uniflow_id": server_msui},
+        ) as (client, server):
             # check handshake completed
             self.check_handshake(client=client, server=server)
 
             # check each endpoint has available connection IDs for each uniflow for the peer
-            for i in range(2):
+            for i in range(client_msui + 1):
                 self.assertEqual(
                     sequence_numbers(client._sending_uniflows[i].cid_available),
                     [1, 2, 3, 4, 5, 6, 7],
                 )
+            for i in range(server_msui + 1):
                 self.assertEqual(
                     sequence_numbers(server._sending_uniflows[i].cid_available),
                     [1, 2, 3, 4, 5, 6, 7],
@@ -225,3 +235,31 @@ class QuicMPConnectionTest(TestCase):
             # check server log
             server_log = server.configuration.quic_logger.to_dict()
             self.assertGreater(len(server_log["traces"][0]["events"]), 20)
+
+    def test_change_connection_id(self):
+        client_msui = 1
+        server_msui = 1
+        client_uniflow_id = 0
+        with client_and_server(
+                client_options={"max_sending_uniflow_id": client_msui},
+                server_options={"max_sending_uniflow_id": server_msui},
+        ) as (client, server):
+            self.assertEqual(
+                sequence_numbers(client._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
+            )
+
+            # the client changes connection ID
+            client.change_connection_id(client_uniflow_id)
+            self.assertEqual(transfer(client, server), 1)
+            self.assertEqual(
+                sequence_numbers(client._sending_uniflows[client_uniflow_id].cid_available),
+                [2, 3, 4, 5, 6, 7],
+            )
+
+            # the server provides a new connection ID
+            self.assertEqual(transfer(server, client), 1)
+            self.assertEqual(
+                sequence_numbers(client._sending_uniflows[client_uniflow_id].cid_available),
+                [2, 3, 4, 5, 6, 7, 8],
+            )
