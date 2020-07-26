@@ -9,6 +9,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection, QuicReceiveContext
 from aioquic.quic.logger import QuicLogger
 from aioquic.quic.packet import QuicErrorCode
+from aioquic.quic.packet_builder import QuicDeliveryState
 from aioquic.quic.recovery import QuicPacketPacer
 from tests.utils import SERVER_CACERTFILE, SERVER_CERTFILE, SERVER_KEYFILE
 
@@ -73,9 +74,7 @@ def client_and_server(
     server_patch=lambda x: None,
 ):
     client_configuration = QuicConfiguration(
-        is_client=True,
-        quic_logger=QuicLogger(),
-        **client_options
+        is_client=True, quic_logger=QuicLogger(), **client_options
     )
     client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
 
@@ -85,9 +84,7 @@ def client_and_server(
     client_patch(client)
 
     server_configuration = QuicConfiguration(
-        is_client=False,
-        quic_logger=QuicLogger(),
-        **server_options
+        is_client=False, quic_logger=QuicLogger(), **server_options
     )
     server_configuration.load_cert_chain(server_certfile, server_keyfile)
 
@@ -184,9 +181,10 @@ class QuicMPConnectionTest(TestCase):
                 self.assertEqual(type(server.next_event()), events.MPConnectionIdIssued)
         self.assertIsNone(server.next_event())
 
-    def test_connect(self):
+    def test_mp_connect(self):
         client_msui = 1
         server_msui = 1
+        assert client_msui >= 0 and server_msui >= 0
         with client_and_server(
             client_options={"max_sending_uniflow_id": client_msui},
             server_options={"max_sending_uniflow_id": server_msui},
@@ -236,30 +234,145 @@ class QuicMPConnectionTest(TestCase):
             server_log = server.configuration.quic_logger.to_dict()
             self.assertGreater(len(server_log["traces"][0]["events"]), 20)
 
-    def test_change_connection_id(self):
+    def test_mp_change_connection_id(self):
         client_msui = 1
-        server_msui = 1
-        client_uniflow_id = 0
+        server_msui = 0
+        client_uniflow_id = 1
+        assert client_msui >= client_uniflow_id >= 0
         with client_and_server(
-                client_options={"max_sending_uniflow_id": client_msui},
-                server_options={"max_sending_uniflow_id": server_msui},
+            client_options={"max_sending_uniflow_id": client_msui},
+            server_options={"max_sending_uniflow_id": server_msui},
         ) as (client, server):
-            self.assertEqual(
-                sequence_numbers(client._sending_uniflows[0].cid_available),
-                [1, 2, 3, 4, 5, 6, 7],
-            )
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    [1, 2, 3, 4, 5, 6, 7],
+                )
 
             # the client changes connection ID
             client.change_connection_id(client_uniflow_id)
             self.assertEqual(transfer(client, server), 1)
-            self.assertEqual(
-                sequence_numbers(client._sending_uniflows[client_uniflow_id].cid_available),
-                [2, 3, 4, 5, 6, 7],
-            )
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
 
             # the server provides a new connection ID
             self.assertEqual(transfer(server, client), 1)
-            self.assertEqual(
-                sequence_numbers(client._sending_uniflows[client_uniflow_id].cid_available),
-                [2, 3, 4, 5, 6, 7, 8],
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7, 8]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
+
+    def test_mp_change_connection_id_retransmit_new_connection_id(self):
+        client_msui = 1
+        server_msui = 0
+        client_uniflow_id = 1
+        assert client_msui >= client_uniflow_id >= 1
+        with client_and_server(
+            client_options={"max_sending_uniflow_id": client_msui},
+            server_options={"max_sending_uniflow_id": server_msui},
+        ) as (client, server):
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    [1, 2, 3, 4, 5, 6, 7],
+                )
+
+            # the client changes connection ID
+            client.change_connection_id(client_uniflow_id)
+            self.assertEqual(transfer(client, server), 1)
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
+
+            # the server provides a new connection ID, MP_NEW_CONNECTION_ID is lost
+            self.assertEqual(drop(server), 1)
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
+
+            # MP_NEW_CONNECTION_ID is retransmitted
+            server._on_mp_new_connection_id_delivery(
+                QuicDeliveryState.LOST,
+                server._receiving_uniflows[client_uniflow_id].cid_available[-1],
+                client_uniflow_id,
             )
+            self.assertEqual(transfer(server, client), 1)
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7, 8]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
+
+    def test_mp_change_connection_id_retransmit_retire_connection_id(self):
+        client_msui = 1
+        server_msui = 0
+        client_uniflow_id = 1
+        assert client_msui >= client_uniflow_id >= 1
+        with client_and_server(
+            client_options={"max_sending_uniflow_id": client_msui},
+            server_options={"max_sending_uniflow_id": server_msui},
+        ) as (client, server):
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    [1, 2, 3, 4, 5, 6, 7],
+                )
+
+            # the client changes connection ID, MP_RETIRE_CONNECTION_ID is lost
+            client.change_connection_id(client_uniflow_id)
+            self.assertEqual(drop(client), 1)
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
+
+            # MP_RETIRE_CONNECTION_ID is retransmitted
+            client._on_mp_retire_connection_id_delivery(
+                QuicDeliveryState.LOST, 0, client_uniflow_id
+            )
+            self.assertEqual(transfer(client, server), 1)
+
+            # the server provides a new connection ID
+            self.assertEqual(transfer(server, client), 1)
+            for i in range(client_msui + 1):
+                self.assertEqual(
+                    sequence_numbers(client._sending_uniflows[i].cid_available),
+                    (
+                        [2, 3, 4, 5, 6, 7, 8]
+                        if i == client_uniflow_id
+                        else [1, 2, 3, 4, 5, 6, 7]
+                    ),
+                )
