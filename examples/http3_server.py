@@ -443,6 +443,12 @@ if __name__ == "__main__":
 
     # collect the ports
     ports = args.ports.split(" ")
+    ports = [int(p) for p in ports]
+
+    # set the available addresses
+    addresses = []
+    for port in ports:
+        addresses.append(("::1", port))
 
     # import ASGI application
     module_str, attr_str = args.app.split(":", maxsplit=1)
@@ -469,6 +475,7 @@ if __name__ == "__main__":
         is_client=False,
         max_datagram_frame_size=65536,
         local_ports=ports,
+        local_addresses=addresses,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
         max_sending_uniflow_id=max_sending_uniflows_id,
@@ -488,8 +495,8 @@ if __name__ == "__main__":
         loop.run_until_complete(
             serve(
                 args.host,
-                int(port),
-                identity=port,
+                port,
+                identity=str(port),
                 configuration=configuration,
                 create_protocol=HttpServerProtocol,
                 protocols=protocols,

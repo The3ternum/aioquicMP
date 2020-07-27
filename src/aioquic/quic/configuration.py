@@ -69,6 +69,11 @@ class QuicConfiguration:
     .. note:: This is only used by clients.
     """
 
+    local_addresses: Optional[list] = None
+    """
+    The available addresses of a host
+    """
+
     local_ports: Optional[list] = None
     """
     The available ports of a host

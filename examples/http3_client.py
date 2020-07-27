@@ -426,6 +426,8 @@ if __name__ == "__main__":
         is_client=True,
         alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN,
         max_sending_uniflow_id=max_sending_uniflows_id,
+        # Todo
+        local_addresses=[],
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)

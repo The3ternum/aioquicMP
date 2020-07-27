@@ -87,6 +87,7 @@ STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
 MP_NEW_CONNECTION_ID_FRAME_CAPACITY = 1 + 8 + 8 + 8 + 1 + 20 + 16
 MP_RETIRE_CONNECTION_ID_CAPACITY = 1 + 8 + 8
+ADD_ADDRESS_CAPACITY = 1 + 1 + 8 + 1 + 16 + 2  # Todo check
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -196,14 +197,14 @@ class QuicReceivingUniflow:
     def __init__(
         self,
         *,
-        uniflow_id,
-        source_address,
-        destination_address,
-        local_address_id,
-        is_first,
+        uniflow_id: int,
+        source_address: NetworkAddress,
+        destination_address: NetworkAddress,
+        local_address_id: int,
+        is_first: bool,
         configuration: QuicConfiguration,
     ) -> None:
-        self.uniflow_id = uniflow_id
+        self.uniflow_id: int = uniflow_id
         self.cid_available: List[QuicConnectionId] = [
             QuicConnectionId(
                 cid=os.urandom(configuration.connection_id_length),
@@ -215,38 +216,67 @@ class QuicReceivingUniflow:
         self.cid: bytes = self.cid_available[0].cid
         self.cid_seq: int = 1
         self.active_connection_id_limit: int = 8
-        self.packet_number = 0
-        self.source_address = source_address
-        self.destination_address = destination_address
-        self.local_address_id = local_address_id
+        self.packet_number: int = 0
+        self.source_address: NetworkAddress = source_address
+        self.destination_address: NetworkAddress = destination_address
+        self.local_address_id: int = local_address_id
 
 
 class QuicSendingUniflow:
     def __init__(
         self,
         *,
-        uniflow_id,
-        source_address,
-        destination_address,
-        local_address_id,
-        remote_address_id,
+        uniflow_id: int,
+        source_address: NetworkAddress,
+        destination_address: NetworkAddress,
+        local_address_id: int,
+        remote_address_id: int,
         configuration: QuicConfiguration,
     ) -> None:
-        self.uniflow_id = uniflow_id
+        self.uniflow_id: int = uniflow_id
         self.cid: bytes = os.urandom(configuration.connection_id_length)
         self.cid_seq: Optional[int] = None
         self.cid_available: List[QuicConnectionId] = []
         self.token: bytes = b""
         self.active_connection_id_limit: int = 0
         self.retire_connection_ids: List[int] = []
-        self.state = UniflowState.UNUSED
-        self.packet_number = 0
-        self.source_address = source_address
-        self.destination_address = destination_address
-        self.local_address_id = local_address_id
-        self.remote_address_id = remote_address_id
+        self.state: UniflowState = UniflowState.UNUSED
+        self.packet_number: int = 0
+        self.source_address: NetworkAddress = source_address
+        self.destination_address: NetworkAddress = destination_address
+        self.local_address_id: int = local_address_id
+        self.remote_address_id: int = remote_address_id
         # Congestion controller
         # Performance metrics
+
+
+class IPVersion(Enum):
+    IPV4 = 4
+    IPV6 = 6
+
+
+class IFType(Enum):
+    FIXED = 0
+    WLAN = 1
+    CELLULAR = 2
+
+
+class MPNetworkAddress:
+    def __init__(
+        self,
+        *,
+        address_id: int,
+        ip_version: IPVersion,
+        interface_type: IFType,
+        ip_address: NetworkAddress,
+        is_validated: bool,
+    ) -> None:
+        self.address_id: int = address_id
+        self.ip_version: IPVersion = ip_version
+        self.interface_type: IFType = interface_type
+        self.ip_address: NetworkAddress = ip_address
+        self.was_sent: bool = False
+        self.is_validated = is_validated
 
 
 class QuicConnection:
@@ -357,6 +387,19 @@ class QuicConnection:
         self._max_sending_uniflows_id = configuration.max_sending_uniflow_id
         self._peer_mp_support = False
         self._peer_max_sending_uniflows_id = 0
+
+        self._local_addresses: List[MPNetworkAddress] = []
+        for i in range(len(configuration.local_addresses)):
+            addr = MPNetworkAddress(
+                address_id=i,
+                ip_version=IPVersion.IPV6,
+                interface_type=IFType.FIXED,
+                ip_address=configuration.local_addresses[i],
+                is_validated=True,
+            )
+            self._local_addresses.append(addr)
+
+        self._remote_addresses: List[MPNetworkAddress] = []
 
         # logging
         if logger_connection_id is None:
@@ -2182,6 +2225,15 @@ class QuicConnection:
                 sequence_number
             )
 
+    def _on_add_address_delivery(
+        self, delivery: QuicDeliveryState, address_id: int
+    ) -> None:
+        """
+        Callback when a ADD_ADDRESS frame is acknowledged or lost.
+        """
+        if delivery != QuicDeliveryState.ACKED:
+            self._local_addresses[address_id].was_sent = False
+
     def _payload_received(
         self, context: QuicReceiveContext, plain: bytes
     ) -> Tuple[bool, bool]:
@@ -2534,6 +2586,15 @@ class QuicConnection:
                                 sequence_number=sequence_number,
                                 uniflow_id=suniflow.uniflow_id,
                             )
+
+                # ADD_ADDRESS
+                for laddress in self._local_addresses:
+                    if not laddress.was_sent:
+                        self._write_add_address_frame(
+                            builder=builder,
+                            address=laddress,
+                            address_id=laddress.address_id,
+                        )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:
@@ -3055,3 +3116,20 @@ class QuicConnection:
                     uniflow_id=uniflow_id, sequence_number=sequence_number
                 )
             )
+
+    def _write_add_address_frame(
+        self, builder: QuicPacketBuilder, address: MPNetworkAddress, address_id: int
+    ) -> None:
+        buf = builder.start_frame(
+            QuicFrameType.ADD_ADDRESS,
+            capacity=ADD_ADDRESS_CAPACITY,
+            handler=self._on_add_address_delivery,
+            handler_args=(address_id,),
+        )
+
+        # Todo: place in buffer
+
+        address.was_sent = True
+
+        # log frame
+        # Todo
