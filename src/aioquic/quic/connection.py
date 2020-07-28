@@ -1,9 +1,10 @@
 import binascii
 import logging
 import os
+import socket
 from collections import deque
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .. import tls
@@ -87,7 +88,7 @@ STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
 MP_NEW_CONNECTION_ID_FRAME_CAPACITY = 1 + 8 + 8 + 8 + 1 + 20 + 16
 MP_RETIRE_CONNECTION_ID_CAPACITY = 1 + 8 + 8
-ADD_ADDRESS_CAPACITY = 1 + 1 + 8 + 1 + 16 + 2  # Todo check
+REMOVE_ADDRESS_CAPACITY = 1 + 1 + 8
 
 
 def EPOCHS(shortcut: str) -> FrozenSet[tls.Epoch]:
@@ -250,12 +251,12 @@ class QuicSendingUniflow:
         # Performance metrics
 
 
-class IPVersion(Enum):
+class IPVersion(IntEnum):
     IPV4 = 4
     IPV6 = 6
 
 
-class IFType(Enum):
+class IFType(IntEnum):
     FIXED = 0
     WLAN = 1
     CELLULAR = 2
@@ -268,15 +269,19 @@ class MPNetworkAddress:
         address_id: int,
         ip_version: IPVersion,
         interface_type: IFType,
-        ip_address: NetworkAddress,
+        ip_address: str,
+        port: Optional[int],
         is_validated: bool,
     ) -> None:
         self.address_id: int = address_id
         self.ip_version: IPVersion = ip_version
         self.interface_type: IFType = interface_type
-        self.ip_address: NetworkAddress = ip_address
+        self.ip_address: str = ip_address
+        self.port: Optional[int] = port
         self.was_sent: bool = False
         self.is_validated = is_validated
+        self.sequence_number = 0
+        self.is_removed = False
 
 
 class QuicConnection:
@@ -388,18 +393,20 @@ class QuicConnection:
         self._peer_mp_support = False
         self._peer_max_sending_uniflows_id = 0
 
-        self._local_addresses: List[MPNetworkAddress] = []
+        self._local_addresses: Dict[int, MPNetworkAddress] = {}
         for i in range(len(configuration.local_addresses)):
+            laddr = configuration.local_addresses[i]
             addr = MPNetworkAddress(
                 address_id=i,
-                ip_version=IPVersion.IPV6,
-                interface_type=IFType.FIXED,
-                ip_address=configuration.local_addresses[i],
+                ip_version=laddr[1],
+                interface_type=laddr[2],
+                ip_address=laddr[0],
                 is_validated=True,
+                port=(laddr[3] if len(laddr) >= 4 else None),
             )
-            self._local_addresses.append(addr)
+            self._local_addresses[i] = addr
 
-        self._remote_addresses: List[MPNetworkAddress] = []
+        self._remote_addresses: Dict[int, MPNetworkAddress] = {}
 
         # logging
         if logger_connection_id is None:
@@ -425,8 +432,8 @@ class QuicConnection:
         self._handshake_done_pending = False
         self._ping_pending: List[int] = []
         self._probe_pending = False
-        # self._retire_connection_ids: List[int] = []
         self._streams_blocked_pending = False
+        self._removed_addresses: List[int] = []
 
         # callbacks
         self._session_ticket_fetcher = session_ticket_fetcher
@@ -504,6 +511,43 @@ class QuicConnection:
             self._logger.debug(
                 "Switching to CID %s (%d)", dump_cid(uniflow.cid), uniflow.cid_seq
             )
+
+    def add_address(
+        self, ip_address: str, port: int, ip_version: IPVersion, interface_type: IFType
+    ) -> None:
+        """
+        Add a new address for the connection to communicate over.
+
+        After calling this method call :meth:`datagrams_to_send` to retrieve data
+        which needs to be sent.
+        """
+        # Todo: add check for already existing addresses?
+        address_id = -1
+        for addr in self._local_addresses.values():
+            if addr.address_id > address_id:
+                address_id = addr.address_id
+        address_id += 1
+        self._local_addresses[address_id] = MPNetworkAddress(
+            address_id=len(self._local_addresses),
+            ip_version=ip_version,
+            interface_type=interface_type,
+            ip_address=ip_address,
+            port=port,
+            is_validated=True,
+        )
+
+    def remove_address(self, address_id: int):
+        """
+        Remove an address from the connection.
+
+        After calling this method call :meth:`datagrams_to_send` to retrieve data
+            which needs to be sent.
+        """
+        if address_id in self._local_addresses.keys():
+            self._local_addresses[address_id].is_removed = True
+            self._local_addresses[address_id].sequence_number += 1
+            self._removed_addresses.append(address_id)
+            # TODO: clear uniflows that use this address
 
     def close(
         self,
@@ -2073,23 +2117,19 @@ class QuicConnection:
         Handle an ADD_ADDRESS frame
         """
         first_byte = buf.pull_uint8()
-
+        ip_version = IPVersion(first_byte & 15)
         address_id = buf.pull_uint8()
         sequence_number = buf.pull_uint_var()
-        interface_type = buf.pull_uint8()
-        ip_address = None
-        port = 443
-
-        # Fixme
-        # if first_byte & 15 == 4:
-        #     ipv4_address_value = buf.pull_uint32()
-        #     ip_address = ipaddress.IPv4Address(ipv4_address_value)
-        # else:
-        #     ipv6_address_value = buf.pull_bytes(16)
-        #     ip_address = ipaddress.IPv6Address(ipv6_address_value)
-
-        if first_byte & 16:
-            port = buf.pull_uint16()
+        ift = buf.pull_uint8()
+        interface_type = IFType(ift)
+        version, length = (
+            (socket.AF_INET, 4)
+            if ip_version == IPVersion.IPV4
+            else (socket.AF_INET6, 16)
+        )
+        ip_bytes = buf.pull_bytes(length)
+        ip_address = socket.inet_ntop(version, ip_bytes)
+        port = buf.pull_uint16() if first_byte & 16 else None
 
         # log frame
         if self._quic_logger is not None:
@@ -2098,12 +2138,21 @@ class QuicConnection:
                     address_id=address_id,
                     sequence_number=sequence_number,
                     interface_type=interface_type,
-                    ip_address=str(ip_address),
+                    ip_address=ip_address,
                     port=port,
                 )
             )
 
-        # Todo
+        new_address = MPNetworkAddress(
+            address_id=address_id,
+            ip_version=ip_version,
+            interface_type=interface_type,
+            ip_address=ip_address,
+            port=port,
+            is_validated=False,
+        )
+        self._remote_addresses[address_id] = new_address
+        # Todo validate address?
 
     def _handle_remove_address(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2119,7 +2168,9 @@ class QuicConnection:
                 )
             )
 
-        # Todo
+        self._remote_addresses[address_id].sequence_number = sequence_number
+        self._remote_addresses[address_id].is_removed = True
+        # TODO: clear uniflows that use this address
 
     def _handle_uniflows_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2233,6 +2284,15 @@ class QuicConnection:
         """
         if delivery != QuicDeliveryState.ACKED:
             self._local_addresses[address_id].was_sent = False
+
+    def _on_remove_address_delivery(
+        self, delivery: QuicDeliveryState, address_id: int
+    ) -> None:
+        """
+        Callback when a REMOVE_ADDRESS frame is acknowledged or lost.
+        """
+        if delivery != QuicDeliveryState.ACKED:
+            self._removed_addresses.append(address_id)
 
     def _payload_received(
         self, context: QuicReceiveContext, plain: bytes
@@ -2588,13 +2648,15 @@ class QuicConnection:
                             )
 
                 # ADD_ADDRESS
-                for laddress in self._local_addresses:
-                    if not laddress.was_sent:
-                        self._write_add_address_frame(
-                            builder=builder,
-                            address=laddress,
-                            address_id=laddress.address_id,
-                        )
+                for laddr in self._local_addresses.values():
+                    if not laddr.was_sent:
+                        self._write_add_address_frame(builder=builder, address=laddr)
+                # REMOVE_ADDRESS
+                while self._removed_addresses:
+                    address_id = self._removed_addresses.pop(0)
+                    self._write_remove_address_frame(
+                        builder=builder, address=self._local_addresses[address_id]
+                    )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:
@@ -3118,18 +3180,66 @@ class QuicConnection:
             )
 
     def _write_add_address_frame(
-        self, builder: QuicPacketBuilder, address: MPNetworkAddress, address_id: int
+        self, builder: QuicPacketBuilder, address: MPNetworkAddress
     ) -> None:
+        frame_overhead = 2 + 1 + 1 + 8 + 1
+        if address.ip_version == IPVersion.IPV4:
+            frame_overhead += 4
+        else:
+            frame_overhead += 16
         buf = builder.start_frame(
             QuicFrameType.ADD_ADDRESS,
-            capacity=ADD_ADDRESS_CAPACITY,
+            capacity=frame_overhead,
             handler=self._on_add_address_delivery,
-            handler_args=(address_id,),
+            handler_args=(address.address_id,),
         )
-
-        # Todo: place in buffer
-
+        first_byte = 0
+        if address.port:
+            first_byte |= 16
+        first_byte |= int(address.ip_version)
+        interface = int(address.interface_type)
+        buf.push_uint8(first_byte)
+        buf.push_uint8(address.address_id)
+        buf.push_uint_var(address.sequence_number)
+        buf.push_uint8(interface)
+        version = (
+            socket.AF_INET if address.ip_version == IPVersion.IPV4 else socket.AF_INET6
+        )
+        ip_bytes = socket.inet_pton(version, address.ip_address)
+        buf.push_bytes(ip_bytes)
+        if address.port:
+            buf.push_uint16(address.port)
         address.was_sent = True
 
         # log frame
-        # Todo
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_add_address_frame(
+                    address_id=address.address_id,
+                    sequence_number=address.sequence_number,
+                    interface_type=int(address.interface_type),
+                    ip_address=address.ip_address,
+                    port=address.port,
+                )
+            )
+
+    def _write_remove_address_frame(
+        self, builder: QuicPacketBuilder, address: MPNetworkAddress
+    ) -> None:
+        buf = builder.start_frame(
+            QuicFrameType.REMOVE_ADDRESS,
+            capacity=REMOVE_ADDRESS_CAPACITY,
+            handler=self._on_remove_address_delivery,
+            handler_args=(address.address_id,),
+        )
+        buf.push_uint8(address.address_id)
+        buf.push_uint_var(address.sequence_number)
+
+        # log frame
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_remove_address_frame(
+                    address_id=address.address_id,
+                    sequence_number=address.sequence_number,
+                )
+            )

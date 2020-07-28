@@ -19,6 +19,7 @@ from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, H3Event, HeadersReceived
 from aioquic.h3.exceptions import NoAvailablePushIDError
 from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.connection import IFType, IPVersion
 from aioquic.quic.events import DatagramFrameReceived, ProtocolNegotiated, QuicEvent
 from aioquic.quic.logger import QuicLogger, QuicLoggerTrace
 from aioquic.tls import SessionTicket
@@ -448,7 +449,7 @@ if __name__ == "__main__":
     # set the available addresses
     addresses = []
     for port in ports:
-        addresses.append(("::1", port))
+        addresses.append(["::1", IPVersion.IPV6, IFType.FIXED, port])
 
     # import ASGI application
     module_str, attr_str = args.app.split(":", maxsplit=1)

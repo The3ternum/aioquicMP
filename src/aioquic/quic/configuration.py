@@ -69,7 +69,7 @@ class QuicConfiguration:
     .. note:: This is only used by clients.
     """
 
-    local_addresses: Optional[list] = None
+    local_addresses: List = field(default_factory=list)
     """
     The available addresses of a host
     """

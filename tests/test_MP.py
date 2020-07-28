@@ -6,7 +6,12 @@ from unittest import TestCase
 from aioquic import tls
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import QuicConnection, QuicReceiveContext
+from aioquic.quic.connection import (
+    IFType,
+    IPVersion,
+    QuicConnection,
+    QuicReceiveContext,
+)
 from aioquic.quic.logger import QuicLogger
 from aioquic.quic.packet import QuicErrorCode
 from aioquic.quic.packet_builder import QuicDeliveryState
@@ -116,6 +121,10 @@ def disable_packet_pacing(connection):
 
 def sequence_numbers(connection_ids):
     return list(map(lambda x: x.sequence_number, connection_ids))
+
+
+def address_ids(mp_network_addresses):
+    return list(map(lambda x: x.address_id, mp_network_addresses))
 
 
 def drop(sender):
@@ -376,3 +385,21 @@ class QuicMPConnectionTest(TestCase):
                         else [1, 2, 3, 4, 5, 6, 7]
                     ),
                 )
+
+    def test_mp_remove_address(self):
+        address_id = 1
+        with client_and_server(
+            server_options={
+                "local_addresses": [
+                    ["::1", IPVersion.IPV6, IFType.FIXED, 4433],
+                    ["::1", IPVersion.IPV6, IFType.FIXED, 4444],
+                    ["::1", IPVersion.IPV6, IFType.FIXED, 4455],
+                ]
+            },
+        ) as (client, server):
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1, 2])
+
+            # the server removes the second address, REMOVE_ADDRESS is sent
+            server.remove_address(address_id)
+            self.assertEqual(transfer(server, client), 1)
+            self.assertEqual(client._remote_addresses[address_id].is_removed, True)

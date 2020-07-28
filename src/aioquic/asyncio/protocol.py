@@ -2,7 +2,7 @@ import asyncio
 from typing import Any, Callable, Dict, Optional, Text, Tuple, Union, cast
 
 from ..quic import events
-from ..quic.connection import NetworkAddress, QuicConnection
+from ..quic.connection import IFType, IPVersion, NetworkAddress, QuicConnection
 
 QuicConnectionIdHandler = Callable[[bytes], None]
 QuicStreamHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], None]
@@ -42,6 +42,22 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         The previous connection ID will be retired.
         """
         self._quic.change_connection_id(uniflow_id)
+        self.transmit()
+
+    def add_address(
+        self, ip_address: str, port: int, ip_version: IPVersion, interface_type: IFType
+    ) -> None:
+        """
+        Add a new address for the connection to communicate over.
+        """
+        self._quic.add_address(ip_address, port, ip_version, interface_type)
+        self.transmit()
+
+    def remove_address(self, address_id: int):
+        """
+        Remove an address from the connection.
+        """
+        self._quic.remove_address(address_id)
         self.transmit()
 
     def close(self) -> None:
