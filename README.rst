@@ -135,7 +135,7 @@ You can run the example server, which handles both HTTP/0.9 and HTTP/3:
 
 .. code-block:: console
 
-   $ python examples/http3_server.py --certificate tests/ssl_cert.pem --private-key tests/ssl_key.pem
+   $ python examples/http3_server.py --certificate tests/ssl_cert.pem --private-key tests/ssl_key.pem --multipath 4
 
 HTTP/3 client
 .............
@@ -144,19 +144,19 @@ You can run the example client to perform an HTTP/3 request:
 
 .. code-block:: console
 
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem https://localhost:4433/
+  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --multipath 4 https://localhost:4433/
 
 Alternatively you can perform an HTTP/0.9 request:
 
 .. code-block:: console
 
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --legacy-http https://localhost:4433/
+  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --legacy-http --multipath 4 https://localhost:4433/
 
 You can also open a WebSocket over HTTP/3:
 
 .. code-block:: console
 
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem wss://localhost:4433/ws
+  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --multipath 4 wss://localhost:4433/ws
 
 License
 -------
