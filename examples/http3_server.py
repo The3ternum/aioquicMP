@@ -19,7 +19,6 @@ from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, H3Event, HeadersReceived
 from aioquic.h3.exceptions import NoAvailablePushIDError
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import IFType, IPVersion
 from aioquic.quic.events import DatagramFrameReceived, ProtocolNegotiated, QuicEvent
 from aioquic.quic.logger import QuicLogger, QuicLoggerTrace
 from aioquic.tls import SessionTicket
@@ -446,11 +445,6 @@ if __name__ == "__main__":
     ports = args.ports.split(" ")
     ports = [int(p) for p in ports]
 
-    # set the available addresses
-    addresses = []
-    for port in ports:
-        addresses.append(["::1", IPVersion.IPV6, IFType.FIXED, port])
-
     # import ASGI application
     module_str, attr_str = args.app.split(":", maxsplit=1)
     module = importlib.import_module(module_str)
@@ -475,8 +469,6 @@ if __name__ == "__main__":
         alpn_protocols=H3_ALPN + H0_ALPN + ["siduck"],
         is_client=False,
         max_datagram_frame_size=65536,
-        local_ports=ports,
-        local_addresses=addresses,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
         max_sending_uniflow_id=max_sending_uniflows_id,
@@ -497,7 +489,6 @@ if __name__ == "__main__":
             serve(
                 args.host,
                 port,
-                identity=str(port),
                 configuration=configuration,
                 create_protocol=HttpServerProtocol,
                 protocols=protocols,

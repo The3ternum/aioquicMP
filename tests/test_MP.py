@@ -147,9 +147,10 @@ def transfer(sender, receiver):
     """
     datagrams = 0
     from_addr = CLIENT_ADDR if sender._is_client else SERVER_ADDR
+    to_addr = SERVER_ADDR if sender._is_client else CLIENT_ADDR
     for data, addr in sender.datagrams_to_send(now=time.time()):
         datagrams += 1
-        receiver.receive_datagram(data, from_addr, now=time.time())
+        receiver.receive_datagram(data, from_addr, to_addr, now=time.time())
     return datagrams
 
 
@@ -242,6 +243,8 @@ class QuicMPConnectionTest(TestCase):
             # check server log
             server_log = server.configuration.quic_logger.to_dict()
             self.assertGreater(len(server_log["traces"][0]["events"]), 20)
+
+    # Todo test unsupported client connection
 
     def test_mp_change_connection_id(self):
         client_msui = 1

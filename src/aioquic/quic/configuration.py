@@ -74,11 +74,6 @@ class QuicConfiguration:
     The available addresses of a host
     """
 
-    local_ports: Optional[list] = None
-    """
-    The available ports of a host
-    """
-
     session_ticket: Optional[SessionTicket] = None
     """
     The TLS session ticket which should be used for session resumption.

@@ -102,7 +102,6 @@ class HighLevelTest(TestCase):
             configuration = QuicConfiguration(is_client=False)
             configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
         self.server = await serve(
-            identity=str(self.server_port),
             host=host,
             port=self.server_port,
             configuration=configuration,

@@ -5,7 +5,7 @@ from typing import Callable, Dict, Optional, Text, Union, cast
 
 from ..buffer import Buffer
 from ..quic.configuration import QuicConfiguration
-from ..quic.connection import NetworkAddress, QuicConnection
+from ..quic.connection import IFType, IPVersion, NetworkAddress, QuicConnection
 from ..quic.packet import (
     PACKET_TYPE_INITIAL,
     encode_quic_retry,
@@ -23,7 +23,6 @@ class QuicServer(asyncio.DatagramProtocol):
     def __init__(
         self,
         *,
-        identity: str,
         configuration: QuicConfiguration,
         create_protocol: Callable = QuicConnectionProtocol,
         protocols: Dict[bytes, QuicConnectionProtocol],
@@ -32,8 +31,7 @@ class QuicServer(asyncio.DatagramProtocol):
         stateless_retry: bool = False,
         stream_handler: Optional[QuicStreamHandler] = None,
     ) -> None:
-        self._identity = identity
-        self.count = 0
+        self.identity: Optional[NetworkAddress] = None
         self._configuration = configuration
         self._create_protocol = create_protocol
         self._loop = asyncio.get_event_loop()
@@ -56,13 +54,18 @@ class QuicServer(asyncio.DatagramProtocol):
         self._transport.close()
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        # print("server " + self._identity + " connection made")
         self._transport = cast(asyncio.DatagramTransport, transport)
+        sock = self._transport.get_extra_info("socket")
+        host, port, arg1, arg2 = sock.getsockname()
+        # todo allow ipv4 addresses
+        host += "ffff:127.0.0.1"
+        self.identity = (host, port, 0, 0)
+        self._configuration.local_addresses.append(
+            [host, IPVersion.IPV6, IFType.FIXED, port]
+        )
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
-        # count = self.count
-        self.count += 1
-        # print("server " + self._identity + " datagram " + str(count) + " received")
+        # print(self.identity + " datgram received from " + addr[0] + ":" + str(addr[1]))
         data = cast(bytes, data)
         buf = Buffer(data=data)
 
@@ -132,7 +135,7 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol = self._create_protocol(
                 connection, stream_handler=self._stream_handler
             )
-            protocol.connection_made(self._transport)
+            protocol.server_connection_made(self._transport)
 
             # register callbacks
             protocol._connection_id_issued_handler = partial(
@@ -144,17 +147,14 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol._connection_terminated_handler = partial(
                 self._connection_terminated, protocol=protocol
             )
-            # print("Server " + self._identity + " ", self._protocols.keys())
             self._protocols[header.destination_cid] = protocol
             # self._protocols[connection.host_cid] = protocol
             self._protocols[connection._receiving_uniflows[0].cid] = protocol
 
         if protocol is not None:
-            protocol.datagram_received(data, addr)
-        # print("server " + self._identity + " datagram " + str(count) + " ended")
+            protocol.server_datagram_received(data, addr, self.identity)
 
     def _connection_id_issued(self, cid: bytes, protocol: QuicConnectionProtocol):
-        # print("server " + self._identity + " cid " + str(cid))
         self._protocols[cid] = protocol
 
     def _connection_id_retired(
@@ -173,7 +173,6 @@ async def serve(
     host: str,
     port: int,
     *,
-    identity: str,
     configuration: QuicConfiguration,
     create_protocol: Callable = QuicConnectionProtocol,
     protocols: Dict[bytes, QuicConnectionProtocol],
@@ -211,7 +210,6 @@ async def serve(
 
     _, protocol = await loop.create_datagram_endpoint(
         lambda: QuicServer(
-            identity=identity,
             configuration=configuration,
             create_protocol=create_protocol,
             protocols=protocols,

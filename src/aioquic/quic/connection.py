@@ -278,10 +278,20 @@ class MPNetworkAddress:
         self.interface_type: IFType = interface_type
         self.ip_address: str = ip_address
         self.port: Optional[int] = port
+
         self.was_sent: bool = False
-        self.is_validated = is_validated
+        self.is_validated: bool = is_validated
+
         self.sequence_number = 0
         self.is_removed = False
+
+        self.bytes_received: int = 0
+        self.bytes_sent: int = 0
+        self.local_challenge: Optional[bytes] = None
+        self.remote_challenge: Optional[bytes] = None
+
+    def can_send(self, size: int) -> bool:
+        return self.is_validated or (self.bytes_sent + size) <= 3 * self.bytes_received
 
 
 class QuicConnection:
@@ -394,6 +404,7 @@ class QuicConnection:
         self._peer_max_sending_uniflows_id = 0
 
         self._local_addresses: Dict[int, MPNetworkAddress] = {}
+        # Copy the addresses shared in the configuration
         for i in range(len(configuration.local_addresses)):
             laddr = configuration.local_addresses[i]
             addr = MPNetworkAddress(
@@ -786,7 +797,9 @@ class QuicConnection:
         except IndexError:
             return None
 
-    def receive_datagram(self, data: bytes, addr: NetworkAddress, now: float) -> None:
+    def receive_datagram(
+        self, data: bytes, addr: NetworkAddress, local_addr: NetworkAddress, now: float
+    ) -> None:
         """
         Handle an incoming datagram.
 
@@ -795,8 +808,10 @@ class QuicConnection:
 
         :param data: The datagram which was received.
         :param addr: The network address from which the datagram was received.
+        :param local_addr: The network address on which the datagram was received
         :param now: The current time.
         """
+        # print("Datagram received on ", local_addr, "from", addr)
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -2151,6 +2166,7 @@ class QuicConnection:
             port=port,
             is_validated=False,
         )
+        # print("new address: ", new_address.ip_address, new_address.port)
         self._remote_addresses[address_id] = new_address
         # Todo validate address?
 
@@ -2651,6 +2667,7 @@ class QuicConnection:
                 for laddr in self._local_addresses.values():
                     if not laddr.was_sent:
                         self._write_add_address_frame(builder=builder, address=laddr)
+
                 # REMOVE_ADDRESS
                 while self._removed_addresses:
                     address_id = self._removed_addresses.pop(0)

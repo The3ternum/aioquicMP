@@ -26,6 +26,8 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._transmit_task: Optional[asyncio.Handle] = None
         self._transport: Optional[asyncio.DatagramTransport] = None
 
+        self.identity: Optional[NetworkAddress] = None
+
         # callbacks
         self._connection_id_issued_handler: QuicConnectionIdHandler = lambda c: None
         self._connection_id_retired_handler: QuicConnectionIdHandler = lambda c: None
@@ -146,9 +148,29 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = cast(asyncio.DatagramTransport, transport)
+        sock = self._transport.get_extra_info("socket")
+        host, port, arg1, arg2 = sock.getsockname()
+        # todo allow ipv4 addresses
+        host += "ffff:127.0.0.1"
+        self.identity = (host, port, 0, 0)
+        self._quic.add_address(host, port, IPVersion.IPV6, IFType.FIXED)
+
+    def server_connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self._transport = cast(asyncio.DatagramTransport, transport)
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
-        self._quic.receive_datagram(cast(bytes, data), addr, now=self._loop.time())
+        self._quic.receive_datagram(
+            cast(bytes, data), addr, local_addr=self.identity, now=self._loop.time()
+        )
+        self._process_events()
+        self.transmit()
+
+    def server_datagram_received(
+        self, data: Union[bytes, Text], addr: NetworkAddress, local_addr: NetworkAddress
+    ) -> None:
+        self._quic.receive_datagram(
+            cast(bytes, data), addr, local_addr, now=self._loop.time()
+        )
         self._process_events()
         self.transmit()
 
