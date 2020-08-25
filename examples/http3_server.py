@@ -480,6 +480,7 @@ if __name__ == "__main__":
     ticket_store = SessionTicketStore()
 
     protocols: Dict[bytes, QuicConnectionProtocol] = {}
+    transports: Dict[str, asyncio.DatagramTransport] = {}
 
     if uvloop is not None:
         uvloop.install()
@@ -492,6 +493,7 @@ if __name__ == "__main__":
                 configuration=configuration,
                 create_protocol=HttpServerProtocol,
                 protocols=protocols,
+                transports=transports,
                 session_ticket_fetcher=ticket_store.pop,
                 session_ticket_handler=ticket_store.add,
                 stateless_retry=args.stateless_retry,

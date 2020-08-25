@@ -583,7 +583,7 @@ class QuicConnection:
             )
             self._close_pending = True
 
-    def connect(self, addr: NetworkAddress, now: float) -> None:
+    def connect(self, addr: NetworkAddress, local_addr: NetworkAddress, now: float) -> None:
         """
         Initiate the TLS handshake.
 
@@ -593,6 +593,7 @@ class QuicConnection:
         which needs to be sent.
 
         :param addr: The network address of the remote peer.
+        :param local_addr: The network address of the local peer.
         :param now: The current time.
         """
         assert (
@@ -602,9 +603,14 @@ class QuicConnection:
 
         self._network_paths = [QuicNetworkPath(addr, is_validated=True)]
         self._version = self._configuration.supported_versions[0]
+        for addr in self._local_addresses.values():
+            if addr.ip_address == local_addr[0]:
+                if addr.port and addr.port == local_addr[1]:
+                    self._sending_uniflows[0].local_address_id = addr.address_id
+                    self._sending_uniflows[0].source_address = (addr.ip_address, addr.port)
         self._connect(now=now)
 
-    def datagrams_to_send(self, now: float) -> List[Tuple[bytes, NetworkAddress]]:
+    def datagrams_to_send(self, now: float) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
         """
         Return a list of `(data, addr)` tuples of datagrams which need to be
         sent, and the network address to which they need to be sent.
@@ -720,7 +726,8 @@ class QuicConnection:
         for datagram in datagrams:
             byte_length = len(datagram)
             network_path.bytes_sent += byte_length
-            ret.append((datagram, network_path.addr))
+
+            ret.append((datagram, network_path.addr, selected_uniflow.source_address))
 
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
@@ -944,6 +951,11 @@ class QuicConnection:
                 ), "first packet must be INITIAL"
                 self._network_paths = [network_path]
                 self._version = QuicProtocolVersion(header.version)
+                for addr in self._local_addresses.values():
+                    if addr.ip_address == local_addr[0]:
+                        if addr.port and addr.port == local_addr[1]:
+                            self._sending_uniflows[0].local_address_id = addr.address_id
+                            self._sending_uniflows[0].source_address = (addr.ip_address, addr.port)
                 self._initialize(header.destination_cid)
 
             # determine crypto and packet space

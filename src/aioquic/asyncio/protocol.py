@@ -24,7 +24,7 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._timer: Optional[asyncio.TimerHandle] = None
         self._timer_at: Optional[float] = None
         self._transmit_task: Optional[asyncio.Handle] = None
-        self._transport: Optional[asyncio.DatagramTransport] = None
+        self._transports: Dict[str, asyncio.DatagramTransport] = {}
 
         self.identity: Optional[NetworkAddress] = None
 
@@ -75,7 +75,7 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
         This method can only be called for clients and a single time.
         """
-        self._quic.connect(addr, now=self._loop.time())
+        self._quic.connect(addr, self.identity, now=self._loop.time())
         self.transmit()
 
     async def create_stream(
@@ -117,8 +117,11 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._transmit_task = None
 
         # send datagrams
-        for data, addr in self._quic.datagrams_to_send(now=self._loop.time()):
-            self._transport.sendto(data, addr)
+        for (data, addr, source_addr) in self._quic.datagrams_to_send(now=self._loop.time()):
+            local_addr = source_addr[0]
+            if source_addr[1] is not None:
+                local_addr += ":" + str(source_addr[1])
+            self._transports[local_addr].sendto(data, addr)
 
         # re-arm timer
         timer_at = self._quic.get_timer()
@@ -147,16 +150,17 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
     # asyncio.Transport
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        self._transport = cast(asyncio.DatagramTransport, transport)
-        sock = self._transport.get_extra_info("socket")
+        transport = cast(asyncio.DatagramTransport, transport)
+        sock = transport.get_extra_info("socket")
         host, port, arg1, arg2 = sock.getsockname()
         # todo allow ipv4 addresses
         host += "ffff:127.0.0.1"
         self.identity = (host, port, 0, 0)
         self._quic.add_address(host, port, IPVersion.IPV6, IFType.FIXED)
+        self._transports[host+":"+str(port)] = transport
 
-    def server_connection_made(self, transport: asyncio.BaseTransport) -> None:
-        self._transport = cast(asyncio.DatagramTransport, transport)
+    def server_connection_made(self, transports: Dict[str, asyncio.DatagramTransport]) -> None:
+        self._transports = transports
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
         self._quic.receive_datagram(

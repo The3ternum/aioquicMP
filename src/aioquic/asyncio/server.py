@@ -26,6 +26,7 @@ class QuicServer(asyncio.DatagramProtocol):
         configuration: QuicConfiguration,
         create_protocol: Callable = QuicConnectionProtocol,
         protocols: Dict[bytes, QuicConnectionProtocol],
+        transports: Dict[str, asyncio.DatagramTransport],
         session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
         session_ticket_handler: Optional[SessionTicketHandler] = None,
         stateless_retry: bool = False,
@@ -39,6 +40,7 @@ class QuicServer(asyncio.DatagramProtocol):
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
         self._transport: Optional[asyncio.DatagramTransport] = None
+        self._transports: Dict[str, asyncio.DatagramTransport] = transports
 
         self._stream_handler = stream_handler
 
@@ -63,6 +65,7 @@ class QuicServer(asyncio.DatagramProtocol):
         self._configuration.local_addresses.append(
             [host, IPVersion.IPV6, IFType.FIXED, port]
         )
+        self._transports[host+":"+str(port)] = self._transport
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
         # print(self.identity + " datgram received from " + addr[0] + ":" + str(addr[1]))
@@ -135,7 +138,7 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol = self._create_protocol(
                 connection, stream_handler=self._stream_handler
             )
-            protocol.server_connection_made(self._transport)
+            protocol.server_connection_made(self._transports)
 
             # register callbacks
             protocol._connection_id_issued_handler = partial(
@@ -176,6 +179,7 @@ async def serve(
     configuration: QuicConfiguration,
     create_protocol: Callable = QuicConnectionProtocol,
     protocols: Dict[bytes, QuicConnectionProtocol],
+    transports: Dict[str, asyncio.DatagramTransport],
     session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
     session_ticket_handler: Optional[SessionTicketHandler] = None,
     stateless_retry: bool = False,
@@ -213,6 +217,7 @@ async def serve(
             configuration=configuration,
             create_protocol=create_protocol,
             protocols=protocols,
+            transports=transports,
             session_ticket_fetcher=session_ticket_fetcher,
             session_ticket_handler=session_ticket_handler,
             stateless_retry=stateless_retry,
