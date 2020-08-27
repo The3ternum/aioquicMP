@@ -75,7 +75,7 @@ def create_standalone_client(self, **client_options):
     client._ack_delay = 0
 
     # kick-off handshake
-    client.connect(SERVER_ADDR, now=time.time())
+    client.connect(SERVER_ADDR, CLIENT_ADDR, now=time.time())
     self.assertEqual(drop(client), 1)
 
     return client
@@ -115,7 +115,7 @@ def client_and_server(
 
     # perform handshake
     if handshake:
-        client.connect(SERVER_ADDR, now=time.time())
+        client.connect(SERVER_ADDR, CLIENT_ADDR, now=time.time())
         for i in range(3):
             roundtrip(client, server)
 
@@ -159,7 +159,7 @@ def transfer(sender, receiver):
     datagrams = 0
     from_addr = CLIENT_ADDR if sender._is_client else SERVER_ADDR
     to_addr = SERVER_ADDR if sender._is_client else CLIENT_ADDR
-    for data, addr in sender.datagrams_to_send(now=time.time()):
+    for data, addr, local_addr in sender.datagrams_to_send(now=time.time()):
         datagrams += 1
         receiver.receive_datagram(data, from_addr, to_addr, now=time.time())
     return datagrams
@@ -302,7 +302,7 @@ class QuicConnectionTest(TestCase):
 
         # client sends INITIAL
         now = 0.0
-        client.connect(SERVER_ADDR, now=now)
+        client.connect(SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [1280])
         self.assertEqual(client.get_timer(), 1.0)
@@ -371,7 +371,7 @@ class QuicConnectionTest(TestCase):
 
         # client sends INITIAL
         now = 0.0
-        client.connect(SERVER_ADDR, now=now)
+        client.connect(SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [1280])
         self.assertEqual(client.get_timer(), 1.0)
@@ -466,7 +466,7 @@ class QuicConnectionTest(TestCase):
 
         # client sends INITIAL
         now = 0.0
-        client.connect(SERVER_ADDR, now=now)
+        client.connect(SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [1280])
         self.assertEqual(client.get_timer(), 1.0)
@@ -566,7 +566,7 @@ class QuicConnectionTest(TestCase):
             server_kwargs={"session_ticket_fetcher": ticket_store.pop},
             handshake=False,
         ) as (client, server):
-            client.connect(SERVER_ADDR, now=time.time())
+            client.connect(SERVER_ADDR, CLIENT_ADDR, now=time.time())
             stream_id = client.get_next_available_stream_id()
             client.send_stream_data(stream_id, b"hello")
 
@@ -784,7 +784,7 @@ class QuicConnectionTest(TestCase):
 
             # server sends close
             server.close(error_code=QuicErrorCode.NO_ERROR)
-            for data, addr in server.datagrams_to_send(now=time.time()):
+            for data, addr, local_addr, in server.datagrams_to_send(now=time.time()):
                 client.receive_datagram(data, SERVER_ADDR, CLIENT_ADDR, now=time.time())
 
     def test_tls_error(self):
@@ -1204,7 +1204,7 @@ class QuicConnectionTest(TestCase):
         with client_and_server() as (client, server):
             # client changes address and sends some data
             client.send_stream_data(0, b"01234567")
-            for data, addr in client.datagrams_to_send(now=time.time()):
+            for data, addr, local_addr in client.datagrams_to_send(now=time.time()):
                 server.receive_datagram(
                     data, ("1.2.3.4", 2345), SERVER_ADDR, now=time.time()
                 )
@@ -1217,9 +1217,9 @@ class QuicConnectionTest(TestCase):
             self.assertTrue(server._network_paths[1].is_validated)
 
             # server sends PATH_CHALLENGE and receives PATH_RESPONSE
-            for data, addr in server.datagrams_to_send(now=time.time()):
+            for data, addr, local_addr in server.datagrams_to_send(now=time.time()):
                 client.receive_datagram(data, SERVER_ADDR, CLIENT_ADDR, now=time.time())
-            for data, addr in client.datagrams_to_send(now=time.time()):
+            for data, addr, local_addr in client.datagrams_to_send(now=time.time()):
                 server.receive_datagram(
                     data, ("1.2.3.4", 2345), SERVER_ADDR, now=time.time()
                 )

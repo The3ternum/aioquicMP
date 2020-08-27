@@ -324,7 +324,8 @@ async def test_migration(server: Server, configuration: QuicConfiguration):
 
         # change connection ID and replace transport
         protocol.change_connection_id(0)
-        protocol._transport.close()
+        for transport in protocol._transports.values():
+            transport.close()
         await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 
         # cause more traffic
@@ -353,7 +354,8 @@ async def test_rebinding(server: Server, configuration: QuicConfiguration):
         await protocol.ping()
 
         # replace transport
-        protocol._transport.close()
+        for transport in protocol._transports.values():
+            transport.close()
         await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 
         # cause more traffic

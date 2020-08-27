@@ -106,6 +106,7 @@ class HighLevelTest(TestCase):
             port=self.server_port,
             configuration=configuration,
             protocols={},
+            transports={},
             stream_handler=handle_stream,
             **kwargs
         )

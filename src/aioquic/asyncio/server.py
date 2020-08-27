@@ -1,6 +1,7 @@
 import asyncio
 import os
 from functools import partial
+from ipaddress import IPv4Address, ip_address
 from typing import Callable, Dict, Optional, Text, Union, cast
 
 from ..buffer import Buffer
@@ -58,14 +59,16 @@ class QuicServer(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = cast(asyncio.DatagramTransport, transport)
         sock = self._transport.get_extra_info("socket")
-        host, port, arg1, arg2 = sock.getsockname()
-        # todo allow ipv4 addresses
-        host += "ffff:127.0.0.1"
+        info = sock.getsockname()
+        host = info[0]
+        port = info[1]
+        if type(ip_address(host)) is IPv4Address:
+            host = "::ffff:" + host
         self.identity = (host, port, 0, 0)
         self._configuration.local_addresses.append(
             [host, IPVersion.IPV6, IFType.FIXED, port]
         )
-        self._transports[host+":"+str(port)] = self._transport
+        self._transports[host + ":" + str(port)] = self._transport
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
         # print(self.identity + " datgram received from " + addr[0] + ":" + str(addr[1]))

@@ -1,4 +1,5 @@
 import asyncio
+from ipaddress import IPv4Address, ip_address
 from typing import Any, Callable, Dict, Optional, Text, Tuple, Union, cast
 
 from ..quic import events
@@ -117,7 +118,10 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._transmit_task = None
 
         # send datagrams
-        for (data, addr, source_addr) in self._quic.datagrams_to_send(now=self._loop.time()):
+        for (data, addr, source_addr) in self._quic.datagrams_to_send(
+            now=self._loop.time()
+        ):
+            print(source_addr)
             local_addr = source_addr[0]
             if source_addr[1] is not None:
                 local_addr += ":" + str(source_addr[1])
@@ -152,14 +156,18 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         transport = cast(asyncio.DatagramTransport, transport)
         sock = transport.get_extra_info("socket")
-        host, port, arg1, arg2 = sock.getsockname()
-        # todo allow ipv4 addresses
-        host += "ffff:127.0.0.1"
+        info = sock.getsockname()
+        host = info[0]
+        port = info[1]
+        if type(ip_address(host)) is IPv4Address:
+            host = "::ffff:" + host
         self.identity = (host, port, 0, 0)
         self._quic.add_address(host, port, IPVersion.IPV6, IFType.FIXED)
-        self._transports[host+":"+str(port)] = transport
+        self._transports[host + ":" + str(port)] = transport
 
-    def server_connection_made(self, transports: Dict[str, asyncio.DatagramTransport]) -> None:
+    def server_connection_made(
+        self, transports: Dict[str, asyncio.DatagramTransport]
+    ) -> None:
         self._transports = transports
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:

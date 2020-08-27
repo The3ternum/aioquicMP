@@ -583,7 +583,9 @@ class QuicConnection:
             )
             self._close_pending = True
 
-    def connect(self, addr: NetworkAddress, local_addr: NetworkAddress, now: float) -> None:
+    def connect(
+        self, addr: NetworkAddress, local_addr: NetworkAddress, now: float
+    ) -> None:
         """
         Initiate the TLS handshake.
 
@@ -607,10 +609,19 @@ class QuicConnection:
             if addr.ip_address == local_addr[0]:
                 if addr.port and addr.port == local_addr[1]:
                     self._sending_uniflows[0].local_address_id = addr.address_id
-                    self._sending_uniflows[0].source_address = (addr.ip_address, addr.port)
+                    self._sending_uniflows[0].source_address = (
+                        addr.ip_address,
+                        addr.port,
+                    )
+                    print(
+                        "CONNECT set sending uniflow source address: ",
+                        self._sending_uniflows[0].source_address,
+                    )
         self._connect(now=now)
 
-    def datagrams_to_send(self, now: float) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
+    def datagrams_to_send(
+        self, now: float
+    ) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
         """
         Return a list of `(data, addr)` tuples of datagrams which need to be
         sent, and the network address to which they need to be sent.
@@ -955,7 +966,14 @@ class QuicConnection:
                     if addr.ip_address == local_addr[0]:
                         if addr.port and addr.port == local_addr[1]:
                             self._sending_uniflows[0].local_address_id = addr.address_id
-                            self._sending_uniflows[0].source_address = (addr.ip_address, addr.port)
+                            self._sending_uniflows[0].source_address = (
+                                addr.ip_address,
+                                addr.port,
+                            )
+                            print(
+                                "INITIALIZE set sending uniflow source address: ",
+                                self._sending_uniflows[0].source_address,
+                            )
                 self._initialize(header.destination_cid)
 
             # determine crypto and packet space

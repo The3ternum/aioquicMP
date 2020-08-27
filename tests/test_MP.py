@@ -100,7 +100,7 @@ def client_and_server(
 
     # perform handshake
     if handshake:
-        client.connect(SERVER_ADDR, now=time.time())
+        client.connect(SERVER_ADDR, CLIENT_ADDR, now=time.time())
         for i in range(3):
             roundtrip(client, server)
 
@@ -148,7 +148,7 @@ def transfer(sender, receiver):
     datagrams = 0
     from_addr = CLIENT_ADDR if sender._is_client else SERVER_ADDR
     to_addr = SERVER_ADDR if sender._is_client else CLIENT_ADDR
-    for data, addr in sender.datagrams_to_send(now=time.time()):
+    for data, addr, local_addr in sender.datagrams_to_send(now=time.time()):
         datagrams += 1
         receiver.receive_datagram(data, from_addr, to_addr, now=time.time())
     return datagrams
