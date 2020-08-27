@@ -230,7 +230,11 @@ class HttpClient(QuicConnectionProtocol):
 
 
 async def perform_http_request(
-    client: HttpClient, url: str, data: str, include: bool, output_dir: Optional[str],
+    client: HttpClient,
+    url: str,
+    data: str,
+    include: bool,
+    output_dir: Optional[str],
 ) -> None:
     # perform request
     start = time.time()
@@ -378,7 +382,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--legacy-http", action="store_true", help="use HTTP/0.9")
     parser.add_argument(
-        "--output-dir", type=str, help="write downloaded files to this directory",
+        "--output-dir",
+        type=str,
+        help="write downloaded files to this directory",
     )
     parser.add_argument(
         "-q", "--quic-log", type=str, help="log QUIC events to a file in QLOG format"
@@ -399,7 +405,10 @@ if __name__ == "__main__":
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
     parser.add_argument(
-        "--local-port", type=int, default=0, help="local port to bind for connections",
+        "--local-port",
+        type=int,
+        default=0,
+        help="local port to bind for connections",
     )
     parser.add_argument(
         "-m",

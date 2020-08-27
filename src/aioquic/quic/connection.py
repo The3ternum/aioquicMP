@@ -3178,7 +3178,10 @@ class QuicConnection:
             QuicFrameType.MP_NEW_CONNECTION_ID,
             capacity=MP_NEW_CONNECTION_ID_FRAME_CAPACITY,
             handler=self._on_mp_new_connection_id_delivery,
-            handler_args=(connection_id, uniflow_id,),
+            handler_args=(
+                connection_id,
+                uniflow_id,
+            ),
         )
         buf.push_uint_var(uniflow_id)
         buf.push_uint_var(connection_id.sequence_number)
@@ -3213,7 +3216,10 @@ class QuicConnection:
             QuicFrameType.MP_RETIRE_CONNECTION_ID,
             capacity=MP_RETIRE_CONNECTION_ID_CAPACITY,
             handler=self._on_mp_retire_connection_id_delivery,
-            handler_args=(sequence_number, uniflow_id,),
+            handler_args=(
+                sequence_number,
+                uniflow_id,
+            ),
         )
         buf.push_uint_var(uniflow_id)
         buf.push_uint_var(sequence_number)

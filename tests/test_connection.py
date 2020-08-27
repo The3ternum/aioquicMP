@@ -784,7 +784,7 @@ class QuicConnectionTest(TestCase):
 
             # server sends close
             server.close(error_code=QuicErrorCode.NO_ERROR)
-            for data, addr, local_addr, in server.datagrams_to_send(now=time.time()):
+            for (data, addr, local_addr) in server.datagrams_to_send(now=time.time()):
                 client.receive_datagram(data, SERVER_ADDR, CLIENT_ADDR, now=time.time())
 
     def test_tls_error(self):
@@ -962,7 +962,9 @@ class QuicConnectionTest(TestCase):
         self.assertEqual(
             client._close_event,
             events.ConnectionTerminated(
-                error_code=QuicErrorCode.NO_ERROR, frame_type=None, reason_phrase="",
+                error_code=QuicErrorCode.NO_ERROR,
+                frame_type=None,
+                reason_phrase="",
             ),
         )
 

@@ -200,7 +200,9 @@ class QuicLoggerTrace:
         }
 
     def encode_mp_retire_connection_id_frame(
-        self, uniflow_id: int, sequence_number: int,
+        self,
+        uniflow_id: int,
+        sequence_number: int,
     ) -> Dict:
         return {
             "frame_type": "mp_retire_connection_id",
