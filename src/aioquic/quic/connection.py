@@ -738,7 +738,9 @@ class QuicConnection:
             byte_length = len(datagram)
             network_path.bytes_sent += byte_length
 
-            ret.append((datagram, network_path.addr, selected_uniflow.source_address))
+            ret.append(
+                (datagram, network_path.addr[:2], selected_uniflow.source_address)
+            )
 
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
@@ -829,7 +831,6 @@ class QuicConnection:
         :param local_addr: The network address on which the datagram was received
         :param now: The current time.
         """
-        # print("Datagram received on ", local_addr, "from", addr)
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -2196,7 +2197,6 @@ class QuicConnection:
             port=port,
             is_validated=False,
         )
-        # print("new address: ", new_address.ip_address, new_address.port)
         self._remote_addresses[address_id] = new_address
         # Todo validate address?
 

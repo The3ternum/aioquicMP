@@ -1,5 +1,4 @@
 import asyncio
-import ipaddress
 import socket
 import sys
 from ipaddress import IPv4Address, ip_address
@@ -44,30 +43,32 @@ class QuicClient(asyncio.DatagramProtocol):
         *,
         create_protocol: Optional[Callable] = QuicConnectionProtocol,
         session_ticket_handler: Optional[SessionTicketHandler] = None,
+        wait_connected: bool = True,
     ) -> QuicConnectionProtocol:
         loop = asyncio.get_event_loop()
 
         # if host is not an IP address, pass it to enable SNI
-        try:
-            ipaddress.ip_address(host)
-            server_name = None
-        except ValueError:
-            server_name = host
+        # try:
+        #     ipaddress.ip_address(host)
+        #     server_name = None
+        # except ValueError:
+        #    server_name = host
 
         # lookup remote address
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
         addr = infos[0][4]
         if len(addr) == 2:
             # determine behaviour for IPv4
-            if sys.platform == "win32":
-                # on Windows, we must use an IPv4 socket to reach an IPv4 host
-                local_host = "0.0.0.0"
-            else:
+            if not sys.platform == "win32":
                 # other platforms support dual-stack sockets
                 addr = ("::ffff:" + addr[0], addr[1], 0, 0)
+            # else:
+            #   on Windows, we must use an IPv4 socket to reach an IPv4 host
+            #   local_host = "0.0.0.0"
 
         connection = QuicConnection(
-            configuration=self._configuration, session_ticket_handler=session_ticket_handler
+            configuration=self._configuration,
+            session_ticket_handler=session_ticket_handler,
         )
 
         # connect
@@ -77,7 +78,8 @@ class QuicClient(asyncio.DatagramProtocol):
             server = cast(QuicClient, server)
             server.set_protocol(protocol)
         protocol.connect(addr, self.identity)
-        await protocol.wait_connected()
+        if wait_connected:
+            await protocol.wait_connected()
         return protocol
 
     async def close_protocol(self) -> None:
@@ -92,7 +94,7 @@ class QuicClient(asyncio.DatagramProtocol):
         port = info[1]
         if type(ip_address(host)) is IPv4Address:
             host = "::ffff:" + host
-        self.identity = (host, port, 0, 0)
+        self.identity = (host, port)
         self._configuration.local_addresses.append(
             [host, IPVersion.IPV6, IFType.FIXED, port]
         )

@@ -64,7 +64,7 @@ class QuicServer(asyncio.DatagramProtocol):
         port = info[1]
         if type(ip_address(host)) is IPv4Address:
             host = "::ffff:" + host
-        self.identity = (host, port, 0, 0)
+        self.identity = (host, port)
         self._configuration.local_addresses.append(
             [host, IPVersion.IPV6, IFType.FIXED, port]
         )
