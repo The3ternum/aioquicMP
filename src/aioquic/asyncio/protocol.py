@@ -1,5 +1,4 @@
 import asyncio
-from ipaddress import IPv4Address, ip_address
 from typing import Any, Callable, Dict, Optional, Text, Tuple, Union, cast
 
 from ..quic import events
@@ -9,7 +8,7 @@ QuicConnectionIdHandler = Callable[[bytes], None]
 QuicStreamHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], None]
 
 
-class QuicConnectionProtocol(asyncio.DatagramProtocol):
+class QuicConnectionProtocol:
     def __init__(
         self, quic: QuicConnection, stream_handler: Optional[QuicStreamHandler] = None
     ):
@@ -26,8 +25,6 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._timer_at: Optional[float] = None
         self._transmit_task: Optional[asyncio.Handle] = None
         self._transports: Dict[str, asyncio.DatagramTransport] = {}
-
-        self.identity: Optional[NetworkAddress] = None
 
         # callbacks
         self._connection_id_issued_handler: QuicConnectionIdHandler = lambda c: None
@@ -70,13 +67,13 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         self._quic.close()
         self.transmit()
 
-    def connect(self, addr: NetworkAddress) -> None:
+    def connect(self, addr: NetworkAddress, local_addr: NetworkAddress) -> None:
         """
         Initiate the TLS handshake.
 
         This method can only be called for clients and a single time.
         """
-        self._quic.connect(addr, self.identity, now=self._loop.time())
+        self._quic.connect(addr, local_addr, now=self._loop.time())
         self.transmit()
 
     async def create_stream(
@@ -121,7 +118,7 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
         for (data, addr, source_addr) in self._quic.datagrams_to_send(
             now=self._loop.time()
         ):
-            print(source_addr)
+            print("sending from", source_addr, "to", addr)
             local_addr = source_addr[0]
             if source_addr[1] is not None:
                 local_addr += ":" + str(source_addr[1])
@@ -153,33 +150,13 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
     # asyncio.Transport
 
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        transport = cast(asyncio.DatagramTransport, transport)
-        sock = transport.get_extra_info("socket")
-        info = sock.getsockname()
-        host = info[0]
-        port = info[1]
-        if type(ip_address(host)) is IPv4Address:
-            host = "::ffff:" + host
-        self.identity = (host, port, 0, 0)
-        self._quic.add_address(host, port, IPVersion.IPV6, IFType.FIXED)
-        self._transports[host + ":" + str(port)] = transport
-
-    def server_connection_made(
-        self, transports: Dict[str, asyncio.DatagramTransport]
-    ) -> None:
+    def connection_made(self, transports: Dict[str, asyncio.DatagramTransport]) -> None:
         self._transports = transports
 
-    def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
-        self._quic.receive_datagram(
-            cast(bytes, data), addr, local_addr=self.identity, now=self._loop.time()
-        )
-        self._process_events()
-        self.transmit()
-
-    def server_datagram_received(
+    def datagram_received(
         self, data: Union[bytes, Text], addr: NetworkAddress, local_addr: NetworkAddress
     ) -> None:
+        print("received from", addr, "on", local_addr)
         self._quic.receive_datagram(
             cast(bytes, data), addr, local_addr, now=self._loop.time()
         )

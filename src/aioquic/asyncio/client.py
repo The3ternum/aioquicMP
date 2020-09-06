@@ -2,93 +2,141 @@ import asyncio
 import ipaddress
 import socket
 import sys
-from typing import AsyncGenerator, Callable, Optional, cast
+from ipaddress import IPv4Address, ip_address
+from typing import Callable, Dict, Optional, Text, Union, cast
 
 from ..quic.configuration import QuicConfiguration
-from ..quic.connection import QuicConnection
+from ..quic.connection import IFType, IPVersion, NetworkAddress, QuicConnection
 from ..tls import SessionTicketHandler
-from .compat import asynccontextmanager
 from .protocol import QuicConnectionProtocol, QuicStreamHandler
 
-__all__ = ["connect"]
+
+class QuicClient(asyncio.DatagramProtocol):
+    def __init__(
+        self,
+        *,
+        configuration: QuicConfiguration,
+        transports: Dict[str, asyncio.DatagramTransport],
+        stream_handler: Optional[QuicStreamHandler] = None,
+        servers: Dict[str, asyncio.DatagramProtocol],
+    ) -> None:
+        self.identity: Optional[NetworkAddress] = None
+        self._configuration = configuration
+        self._loop = asyncio.get_event_loop()
+        self._protocol: Optional[QuicConnectionProtocol] = None
+        self._transport: Optional[asyncio.DatagramTransport] = None
+        self._transports: Dict[str, asyncio.DatagramTransport] = transports
+        self._stream_handler = stream_handler
+        self._servers = servers
+
+    def close(self):
+        if self._protocol:
+            self._protocol.close()
+        self._transport.close()
+
+    def set_protocol(self, protocol: QuicConnectionProtocol):
+        self._protocol = protocol
+
+    async def create_protocol(
+        self,
+        host: str,
+        port: int,
+        *,
+        create_protocol: Optional[Callable] = QuicConnectionProtocol,
+        session_ticket_handler: Optional[SessionTicketHandler] = None,
+    ) -> QuicConnectionProtocol:
+        loop = asyncio.get_event_loop()
+
+        # if host is not an IP address, pass it to enable SNI
+        try:
+            ipaddress.ip_address(host)
+            server_name = None
+        except ValueError:
+            server_name = host
+
+        # lookup remote address
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        addr = infos[0][4]
+        if len(addr) == 2:
+            # determine behaviour for IPv4
+            if sys.platform == "win32":
+                # on Windows, we must use an IPv4 socket to reach an IPv4 host
+                local_host = "0.0.0.0"
+            else:
+                # other platforms support dual-stack sockets
+                addr = ("::ffff:" + addr[0], addr[1], 0, 0)
+
+        connection = QuicConnection(
+            configuration=self._configuration, session_ticket_handler=session_ticket_handler
+        )
+
+        # connect
+        protocol = create_protocol(connection, stream_handler=self._stream_handler)
+        protocol.connection_made(self._transports)
+        for server in self._servers.values():
+            server = cast(QuicClient, server)
+            server.set_protocol(protocol)
+        protocol.connect(addr, self.identity)
+        await protocol.wait_connected()
+        return protocol
+
+    async def close_protocol(self) -> None:
+        self._protocol.close()
+        await self._protocol.wait_closed()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self._transport = cast(asyncio.DatagramTransport, transport)
+        sock = self._transport.get_extra_info("socket")
+        info = sock.getsockname()
+        host = info[0]
+        port = info[1]
+        if type(ip_address(host)) is IPv4Address:
+            host = "::ffff:" + host
+        self.identity = (host, port, 0, 0)
+        self._configuration.local_addresses.append(
+            [host, IPVersion.IPV6, IFType.FIXED, port]
+        )
+        self._transports[host + ":" + str(port)] = self._transport
+        self._servers[str(port)] = self
+
+    def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
+        if self._protocol is not None:
+            self._protocol.datagram_received(data, addr, self.identity)
 
 
-@asynccontextmanager
-async def connect(
+async def serve_client(
     host: str,
     port: int,
     *,
-    configuration: Optional[QuicConfiguration] = None,
-    create_protocol: Optional[Callable] = QuicConnectionProtocol,
-    session_ticket_handler: Optional[SessionTicketHandler] = None,
-    stream_handler: Optional[QuicStreamHandler] = None,
-    wait_connected: bool = True,
-    local_port: int = 0,
-) -> AsyncGenerator[QuicConnectionProtocol, None]:
+    configuration: QuicConfiguration,
+    transports: Dict[str, asyncio.DatagramTransport],
+    stream_handler: QuicStreamHandler = None,
+    servers: Dict[str, asyncio.DatagramProtocol],
+) -> QuicClient:
     """
-    Connect to a QUIC server at the given `host` and `port`.
+    Start a QUIC client at the given `host` and `port`.
 
-    :meth:`connect()` returns an awaitable. Awaiting it yields a
-    :class:`~aioquic.asyncio.QuicConnectionProtocol` which can be used to
-    create streams.
+    :func:`serve` requires a :class:`~aioquic.quic.configuration.QuicConfiguration`
+    containing TLS certificate and private key as the ``configuration`` argument.
 
-    :func:`connect` also accepts the following optional arguments:
+    :func:`serve` also accepts the following optional arguments:
 
-    * ``configuration`` is a :class:`~aioquic.quic.configuration.QuicConfiguration`
-      configuration object.
-    * ``create_protocol`` allows customizing the :class:`~asyncio.Protocol` that
-      manages the connection. It should be a callable or class accepting the same
-      arguments as :class:`~aioquic.asyncio.QuicConnectionProtocol` and returning
-      an instance of :class:`~aioquic.asyncio.QuicConnectionProtocol` or a subclass.
-    * ``session_ticket_handler`` is a callback which is invoked by the TLS
-      engine when a new session ticket is received.
     * ``stream_handler`` is a callback which is invoked whenever a stream is
       created. It must accept two arguments: a :class:`asyncio.StreamReader`
       and a :class:`asyncio.StreamWriter`.
-    * ``local_port`` is the UDP port number that this client wants to bind.
     """
+
     loop = asyncio.get_event_loop()
-    local_host = "::"
 
-    # if host is not an IP address, pass it to enable SNI
-    try:
-        ipaddress.ip_address(host)
-        server_name = None
-    except ValueError:
-        server_name = host
-
-    # lookup remote address
-    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
-    addr = infos[0][4]
-    if len(addr) == 2:
-        # determine behaviour for IPv4
-        if sys.platform == "win32":
-            # on Windows, we must use an IPv4 socket to reach an IPv4 host
-            local_host = "0.0.0.0"
-        else:
-            # other platforms support dual-stack sockets
-            addr = ("::ffff:" + addr[0], addr[1], 0, 0)
-
-    # prepare QUIC connection
-    if configuration is None:
-        configuration = QuicConfiguration(is_client=True)
-    if server_name is not None:
-        configuration.server_name = server_name
-    connection = QuicConnection(
-        configuration=configuration, session_ticket_handler=session_ticket_handler
-    )
-
-    # connect
     _, protocol = await loop.create_datagram_endpoint(
-        lambda: create_protocol(connection, stream_handler=stream_handler),
-        local_addr=(local_host, local_port),
+        lambda: QuicClient(
+            configuration=configuration,
+            transports=transports,
+            stream_handler=stream_handler,
+            servers=servers,
+        ),
+        local_addr=(host, port),
     )
-    protocol = cast(QuicConnectionProtocol, protocol)
-    protocol.connect(addr)
-    if wait_connected:
-        await protocol.wait_connected()
-    try:
-        yield protocol
-    finally:
-        protocol.close()
-    await protocol.wait_closed()
+    protocol = cast(QuicClient, protocol)
+    servers[str(protocol.identity[1])] = protocol
+    return protocol

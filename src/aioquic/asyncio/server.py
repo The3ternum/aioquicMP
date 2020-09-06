@@ -71,7 +71,7 @@ class QuicServer(asyncio.DatagramProtocol):
         self._transports[host + ":" + str(port)] = self._transport
 
     def datagram_received(self, data: Union[bytes, Text], addr: NetworkAddress) -> None:
-        # print(self.identity + " datgram received from " + addr[0] + ":" + str(addr[1]))
+
         data = cast(bytes, data)
         buf = Buffer(data=data)
 
@@ -141,7 +141,7 @@ class QuicServer(asyncio.DatagramProtocol):
             protocol = self._create_protocol(
                 connection, stream_handler=self._stream_handler
             )
-            protocol.server_connection_made(self._transports)
+            protocol.connection_made(self._transports)
 
             # register callbacks
             protocol._connection_id_issued_handler = partial(
@@ -158,7 +158,7 @@ class QuicServer(asyncio.DatagramProtocol):
             self._protocols[connection._receiving_uniflows[0].cid] = protocol
 
         if protocol is not None:
-            protocol.server_datagram_received(data, addr, self.identity)
+            protocol.datagram_received(data, addr, self.identity)
 
     def _connection_id_issued(self, cid: bytes, protocol: QuicConnectionProtocol):
         self._protocols[cid] = protocol
