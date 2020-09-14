@@ -538,19 +538,3 @@ def pull_uniflow_frame(buf: Buffer) -> Tuple[list, list]:
             {"uniflow_id": uniflow_id, "local_adress_id": local_adress_id}
         )
     return receiving_uniflows, active_sending_uniflows
-
-
-def push_uniflow_frame(
-    buf: Buffer, receiving_uniflows: list, active_sending_uniflows: list
-) -> Tuple[int, int]:
-    rcvUni = len(receiving_uniflows)
-    sndUni = len(active_sending_uniflows)
-    buf.push_uint_var(rcvUni)
-    buf.push_uint_var(sndUni)
-    for i in range(rcvUni):
-        buf.push_uint_var(receiving_uniflows[i]["uniflow_id"])
-        buf.push_uint8(receiving_uniflows[i]["local_adress_id"])
-    for i in range(sndUni):
-        buf.push_uint_var(active_sending_uniflows[i]["uniflow_id"])
-        buf.push_uint8(active_sending_uniflows[i]["local_adress_id"])
-    return rcvUni, sndUni

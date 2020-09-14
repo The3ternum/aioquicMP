@@ -118,7 +118,7 @@ class QuicConnectionProtocol:
         for (data, addr, source_addr) in self._quic.datagrams_to_send(
             now=self._loop.time()
         ):
-            print("sending from", source_addr, "to", addr)
+            # print("sending from", source_addr, "to", addr)
             local_addr = source_addr[0]
             if source_addr[1] is not None:
                 local_addr += ":" + str(source_addr[1])
@@ -156,7 +156,7 @@ class QuicConnectionProtocol:
     def datagram_received(
         self, data: Union[bytes, Text], addr: NetworkAddress, local_addr: NetworkAddress
     ) -> None:
-        print("received from", addr, "on", local_addr)
+        # print("received from", addr, "on", local_addr)
         self._quic.receive_datagram(
             cast(bytes, data), addr, local_addr, now=self._loop.time()
         )

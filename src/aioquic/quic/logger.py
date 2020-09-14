@@ -225,6 +225,7 @@ class QuicLoggerTrace:
         address_id: int,
         sequence_number: int,
         interface_type: int,
+        ip_version: int,
         ip_address: str,
         port: int,
     ) -> Dict:

@@ -53,7 +53,7 @@ def client_receive_context(client, epoch=tls.Epoch.ONE_RTT):
     return QuicReceiveContext(
         epoch=epoch,
         host_cid=client._receiving_uniflows[0].cid,
-        network_path=client._network_paths[0],
+        perceived_address=client._perceived_remote_addresses[0],
         quic_logger_frames=[],
         time=asyncio.get_event_loop().time(),
     )
@@ -1212,11 +1212,24 @@ class QuicConnectionTest(TestCase):
                 )
 
             # check paths
-            self.assertEqual(len(server._network_paths), 2)
-            self.assertEqual(server._network_paths[0].addr, ("1.2.3.4", 2345))
-            self.assertFalse(server._network_paths[0].is_validated)
-            self.assertEqual(server._network_paths[1].addr, ("1.2.3.4", 1234))
-            self.assertTrue(server._network_paths[1].is_validated)
+            self.assertEqual(len(server._perceived_remote_addresses), 2)
+            uniflow = server._receiving_uniflows[0]
+            self.assertEqual(
+                (
+                    uniflow.perceived_remote_addresses[0].ip_address,
+                    uniflow.perceived_remote_addresses[0].port,
+                ),
+                ("1.2.3.4", 2345),
+            )
+            self.assertFalse(uniflow.perceived_remote_addresses[0].is_validated)
+            self.assertEqual(
+                (
+                    uniflow.perceived_remote_addresses[1].ip_address,
+                    uniflow.perceived_remote_addresses[1].port,
+                ),
+                ("1.2.3.4", 1234),
+            )
+            self.assertTrue(uniflow.perceived_remote_addresses[1].is_validated)
 
             # server sends PATH_CHALLENGE and receives PATH_RESPONSE
             for data, addr, local_addr in server.datagrams_to_send(now=time.time()):
@@ -1227,10 +1240,22 @@ class QuicConnectionTest(TestCase):
                 )
 
             # check paths
-            self.assertEqual(server._network_paths[0].addr, ("1.2.3.4", 2345))
-            self.assertTrue(server._network_paths[0].is_validated)
-            self.assertEqual(server._network_paths[1].addr, ("1.2.3.4", 1234))
-            self.assertTrue(server._network_paths[1].is_validated)
+            self.assertEqual(
+                (
+                    uniflow.perceived_remote_addresses[0].ip_address,
+                    uniflow.perceived_remote_addresses[0].port,
+                ),
+                ("1.2.3.4", 2345),
+            )
+            self.assertTrue(uniflow.perceived_remote_addresses[0].is_validated)
+            self.assertEqual(
+                (
+                    uniflow.perceived_remote_addresses[1].ip_address,
+                    uniflow.perceived_remote_addresses[1].port,
+                ),
+                ("1.2.3.4", 1234),
+            )
+            self.assertTrue(uniflow.perceived_remote_addresses[1].is_validated)
 
     def test_handle_path_response_frame_bad(self):
         with client_and_server() as (client, server):

@@ -132,8 +132,8 @@ class HighLevelTest(TestCase):
 
     def test_connect_and_serve_ipv4(self):
         run(self.run_server(host="0.0.0.0"))
-        run(self.run_client_server(host="127.0.0.1"))
-        response = run(self.run_client(host="0.0.0.0"))
+        run(self.run_client_server(host="0.0.0.0"))
+        response = run(self.run_client(host="127.0.0.1"))
         self.assertEqual(response, b"gnip")
 
     @skipIf("ipv6" in SKIP_TESTS, "Skipping IPv6 tests")
