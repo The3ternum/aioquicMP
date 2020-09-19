@@ -123,7 +123,7 @@ Running the examples
 
 `aioquic` comes with a number of examples illustrating various QUIC usecases.
 
-You can browse these examples here: https://github.com/The3ternum/aioquicMP/tree/master/main/examples
+You can browse these examples here: https://github.com/The3ternum/aioquicMP/tree/master/examples
 
 License
 -------
