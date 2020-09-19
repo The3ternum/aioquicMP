@@ -30,7 +30,7 @@ class QuicServer(asyncio.DatagramProtocol):
         transports: Dict[str, asyncio.DatagramTransport],
         session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
         session_ticket_handler: Optional[SessionTicketHandler] = None,
-        stateless_retry: bool = False,
+        retry: bool = False,
         stream_handler: Optional[QuicStreamHandler] = None,
     ) -> None:
         self.identity: Optional[NetworkAddress] = None
@@ -45,7 +45,7 @@ class QuicServer(asyncio.DatagramProtocol):
 
         self._stream_handler = stream_handler
 
-        if stateless_retry:
+        if retry:
             self._retry = QuicRetryTokenHandler()
         else:
             self._retry = None
@@ -101,24 +101,26 @@ class QuicServer(asyncio.DatagramProtocol):
             return
 
         protocol = self._protocols.get(header.destination_cid, None)
-        original_connection_id: Optional[bytes] = None
+        original_destination_connection_id: Optional[bytes] = None
+        retry_source_connection_id: Optional[bytes] = None
         if (
             protocol is None
             and len(data) >= 1200
             and header.packet_type == PACKET_TYPE_INITIAL
         ):
-            # stateless retry
+            # retry
             if self._retry is not None:
                 if not header.token:
                     # create a retry token
+                    source_cid = os.urandom(8)
                     self._transport.sendto(
                         encode_quic_retry(
                             version=header.version,
-                            source_cid=os.urandom(8),
+                            source_cid=source_cid,
                             destination_cid=header.source_cid,
                             original_destination_cid=header.destination_cid,
                             retry_token=self._retry.create_token(
-                                addr, header.destination_cid
+                                addr, header.destination_cid, source_cid
                             ),
                         ),
                         addr,
@@ -127,17 +129,20 @@ class QuicServer(asyncio.DatagramProtocol):
                 else:
                     # validate retry token
                     try:
-                        original_connection_id = self._retry.validate_token(
-                            addr, header.token
-                        )
+                        (
+                            original_destination_connection_id,
+                            retry_source_connection_id,
+                        ) = self._retry.validate_token(addr, header.token)
                     except ValueError:
                         return
+            else:
+                original_destination_connection_id = header.destination_cid
 
             # create new connection
             connection = QuicConnection(
                 configuration=self._configuration,
-                logger_connection_id=original_connection_id or header.destination_cid,
-                original_connection_id=original_connection_id,
+                original_destination_connection_id=original_destination_connection_id,
+                retry_source_connection_id=retry_source_connection_id,
                 session_ticket_fetcher=self._session_ticket_fetcher,
                 session_ticket_handler=self._session_ticket_handler,
             )
@@ -188,7 +193,7 @@ async def serve(
     transports: Dict[str, asyncio.DatagramTransport],
     session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
     session_ticket_handler: Optional[SessionTicketHandler] = None,
-    stateless_retry: bool = False,
+    retry: bool = False,
     stream_handler: QuicStreamHandler = None,
 ) -> QuicServer:
     """
@@ -209,8 +214,8 @@ async def serve(
     * ``session_ticket_handler`` is a callback which is invoked by the TLS
       engine when a new session ticket is issued. It should store the session
       ticket for future lookup.
-    * ``stateless_retry`` specifies whether a stateless retry should be
-      performed prior to handling new connections.
+    * ``retry`` specifies whether client addresses should be validated prior to
+      the cryptographic handshake using a retry packet.
     * ``stream_handler`` is a callback which is invoked whenever a stream is
       created. It must accept two arguments: a :class:`asyncio.StreamReader`
       and a :class:`asyncio.StreamWriter`.
@@ -226,7 +231,7 @@ async def serve(
             transports=transports,
             session_ticket_fetcher=session_ticket_fetcher,
             session_ticket_handler=session_ticket_handler,
-            stateless_retry=stateless_retry,
+            retry=retry,
             stream_handler=stream_handler,
         ),
         local_addr=(host, port),

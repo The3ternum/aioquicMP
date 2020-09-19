@@ -552,9 +552,9 @@ class OfferedPsks:
 @dataclass
 class ClientHello:
     random: bytes
-    session_id: bytes
+    legacy_session_id: bytes
     cipher_suites: List[int]
-    compression_methods: List[int]
+    legacy_compression_methods: List[int]
 
     # extensions
     alpn_protocols: Optional[List[str]] = None
@@ -574,13 +574,12 @@ def pull_client_hello(buf: Buffer) -> ClientHello:
     assert buf.pull_uint8() == HandshakeType.CLIENT_HELLO
     with pull_block(buf, 3):
         assert buf.pull_uint16() == TLS_VERSION_1_2
-        client_random = buf.pull_bytes(32)
 
         hello = ClientHello(
-            random=client_random,
-            session_id=pull_opaque(buf, 1),
+            random=buf.pull_bytes(32),
+            legacy_session_id=pull_opaque(buf, 1),
             cipher_suites=pull_list(buf, 2, buf.pull_uint16),
-            compression_methods=pull_list(buf, 1, buf.pull_uint8),
+            legacy_compression_methods=pull_list(buf, 1, buf.pull_uint8),
         )
 
         # extensions
@@ -634,9 +633,9 @@ def push_client_hello(buf: Buffer, hello: ClientHello) -> None:
     with push_block(buf, 3):
         buf.push_uint16(TLS_VERSION_1_2)
         buf.push_bytes(hello.random)
-        push_opaque(buf, 1, hello.session_id)
+        push_opaque(buf, 1, hello.legacy_session_id)
         push_list(buf, 2, buf.push_uint16, hello.cipher_suites)
-        push_list(buf, 1, buf.push_uint8, hello.compression_methods)
+        push_list(buf, 1, buf.push_uint8, hello.legacy_compression_methods)
 
         # extensions
         with push_block(buf, 2):
@@ -696,7 +695,7 @@ def push_client_hello(buf: Buffer, hello: ClientHello) -> None:
 @dataclass
 class ServerHello:
     random: bytes
-    session_id: bytes
+    legacy_session_id: bytes
     cipher_suite: int
     compression_method: int
 
@@ -711,11 +710,10 @@ def pull_server_hello(buf: Buffer) -> ServerHello:
     assert buf.pull_uint8() == HandshakeType.SERVER_HELLO
     with pull_block(buf, 3):
         assert buf.pull_uint16() == TLS_VERSION_1_2
-        server_random = buf.pull_bytes(32)
 
         hello = ServerHello(
-            random=server_random,
-            session_id=pull_opaque(buf, 1),
+            random=buf.pull_bytes(32),
+            legacy_session_id=pull_opaque(buf, 1),
             cipher_suite=buf.pull_uint16(),
             compression_method=buf.pull_uint8(),
         )
@@ -746,7 +744,7 @@ def push_server_hello(buf: Buffer, hello: ServerHello) -> None:
         buf.push_uint16(TLS_VERSION_1_2)
         buf.push_bytes(hello.random)
 
-        push_opaque(buf, 1, hello.session_id)
+        push_opaque(buf, 1, hello.legacy_session_id)
         buf.push_uint16(hello.cipher_suite)
         buf.push_uint8(hello.compression_method)
 
@@ -1163,7 +1161,7 @@ class SessionTicket:
 
     @property
     def obfuscated_age(self) -> int:
-        age = int((utcnow() - self.not_valid_before).total_seconds())
+        age = int((utcnow() - self.not_valid_before).total_seconds() * 1000)
         return (age + self.age_add) % (1 << 32)
 
 
@@ -1180,6 +1178,7 @@ class Context:
         cadata: Optional[bytes] = None,
         cafile: Optional[str] = None,
         capath: Optional[str] = None,
+        cipher_suites: Optional[List[CipherSuite]] = None,
         logger: Optional[Union[logging.Logger, logging.LoggerAdapter]] = None,
         max_early_data: Optional[int] = None,
         server_name: Optional[str] = None,
@@ -1213,12 +1212,15 @@ class Context:
         ] = lambda d, e, c, s: None
 
         # supported parameters
-        self._cipher_suites = [
-            CipherSuite.AES_256_GCM_SHA384,
-            CipherSuite.AES_128_GCM_SHA256,
-            CipherSuite.CHACHA20_POLY1305_SHA256,
-        ]
-        self._compression_methods: List[int] = [CompressionMethod.NULL]
+        if cipher_suites is not None:
+            self._cipher_suites = cipher_suites
+        else:
+            self._cipher_suites = [
+                CipherSuite.AES_256_GCM_SHA384,
+                CipherSuite.AES_128_GCM_SHA256,
+                CipherSuite.CHACHA20_POLY1305_SHA256,
+            ]
+        self._legacy_compression_methods: List[int] = [CompressionMethod.NULL]
         self._psk_key_exchange_modes: List[int] = [PskKeyExchangeMode.PSK_DHE_KE]
         self._signature_algorithms: List[int] = [
             SignatureAlgorithm.RSA_PSS_RSAE_SHA256,
@@ -1255,11 +1257,11 @@ class Context:
 
         if is_client:
             self.client_random = os.urandom(32)
-            self.session_id = os.urandom(32)
+            self.legacy_session_id = b""
             self.state = State.CLIENT_HANDSHAKE_START
         else:
             self.client_random = None
-            self.session_id = None
+            self.legacy_session_id = None
             self.state = State.SERVER_EXPECT_CLIENT_HELLO
 
     @property
@@ -1350,7 +1352,7 @@ class Context:
             assert input_buf.eof()
 
     def _build_session_ticket(
-        self, new_session_ticket: NewSessionTicket
+        self, new_session_ticket: NewSessionTicket, other_extensions: List[Extension]
     ) -> SessionTicket:
         resumption_master_secret = self.key_schedule.derive_secret(b"res master")
         resumption_secret = hkdf_expand_label(
@@ -1369,7 +1371,7 @@ class Context:
             not_valid_after=timestamp
             + datetime.timedelta(seconds=new_session_ticket.ticket_lifetime),
             not_valid_before=timestamp,
-            other_extensions=self.handshake_extensions,
+            other_extensions=other_extensions,
             resumption_secret=resumption_secret,
             server_name=self._server_name,
             ticket=new_session_ticket.ticket,
@@ -1404,9 +1406,9 @@ class Context:
 
         hello = ClientHello(
             random=self.client_random,
-            session_id=self.session_id,
+            legacy_session_id=self.legacy_session_id,
             cipher_suites=[int(x) for x in self._cipher_suites],
-            compression_methods=self._compression_methods,
+            legacy_compression_methods=self._legacy_compression_methods,
             alpn_protocols=self._alpn_protocols,
             key_share=key_share,
             psk_key_exchange_modes=self._psk_key_exchange_modes
@@ -1475,7 +1477,7 @@ class Context:
             [peer_hello.cipher_suite],
             AlertHandshakeFailure("Unsupported cipher suite"),
         )
-        assert peer_hello.compression_method in self._compression_methods
+        assert peer_hello.compression_method in self._legacy_compression_methods
         assert peer_hello.supported_version in self._supported_versions
 
         # select key schedule
@@ -1635,7 +1637,9 @@ class Context:
 
         # notify application
         if self.new_session_ticket_cb is not None:
-            ticket = self._build_session_ticket(new_session_ticket)
+            ticket = self._build_session_ticket(
+                new_session_ticket, self.received_extensions
+            )
             self.new_session_ticket_cb(ticket)
 
     def _server_handle_hello(
@@ -1667,8 +1671,8 @@ class Context:
             AlertHandshakeFailure("No supported cipher suite"),
         )
         compression_method = negotiate(
-            self._compression_methods,
-            peer_hello.compression_methods,
+            self._legacy_compression_methods,
+            peer_hello.legacy_compression_methods,
             AlertHandshakeFailure("No supported compression method"),
         )
         psk_key_exchange_mode = negotiate(
@@ -1697,7 +1701,7 @@ class Context:
 
         self.client_random = peer_hello.random
         self.server_random = os.urandom(32)
-        self.session_id = peer_hello.session_id
+        self.legacy_session_id = peer_hello.legacy_session_id
         self.received_extensions = peer_hello.other_extensions
 
         # select key schedule
@@ -1789,7 +1793,7 @@ class Context:
         # send hello
         hello = ServerHello(
             random=self.server_random,
-            session_id=self.session_id,
+            legacy_session_id=self.legacy_session_id,
             cipher_suite=cipher_suite,
             compression_method=compression_method,
             key_share=encode_public_key(public_key),
@@ -1886,7 +1890,9 @@ class Context:
             push_new_session_ticket(onertt_buf, self._new_session_ticket)
 
             # notify application
-            ticket = self._build_session_ticket(self._new_session_ticket)
+            ticket = self._build_session_ticket(
+                self._new_session_ticket, self.handshake_extensions
+            )
             self.new_session_ticket_cb(ticket)
 
         self._set_state(State.SERVER_EXPECT_FINISHED)

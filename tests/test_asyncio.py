@@ -251,7 +251,9 @@ class HighLevelTest(TestCase):
         run(self.run_client_server())
 
         # first request
-        response = run(self.run_client(session_ticket_handler=save_ticket))
+        response = run(
+            self.run_client(session_ticket_handler=save_ticket),
+        )
         self.assertEqual(response, b"gnip")
 
         self.assertIsNotNone(client_ticket)
@@ -262,33 +264,49 @@ class HighLevelTest(TestCase):
         run(self.run_client())
         self.assertEqual(response, b"gnip")
 
-    def test_connect_and_serve_with_stateless_retry(self):
+    def test_connect_and_serve_with_retry(self):
         run(self.run_server())
         run(self.run_client_server())
         response = run(self.run_client())
         self.assertEqual(response, b"gnip")
 
-    def test_connect_and_serve_with_stateless_retry_bad_original_connection_id(self):
+    def test_connect_and_serve_with_retry_bad_original_destination_connection_id(self):
         """
         If the server's transport parameters do not have the correct
-        original_connection_id the connection fail.
+        original_destination_connection_id the connection must fail.
         """
 
         def create_protocol(*args, **kwargs):
             protocol = QuicConnectionProtocol(*args, **kwargs)
-            protocol._quic._original_connection_id = None
+            protocol._quic._original_destination_connection_id = None
             return protocol
 
-        run(self.run_server(create_protocol=create_protocol, stateless_retry=True))
+        run(self.run_server(create_protocol=create_protocol, retry=True))
+        run(self.run_client_server())
+        with self.assertRaises(ConnectionError):
+            run(self.run_client())
+
+    def test_connect_and_serve_with_retry_bad_retry_source_connection_id(self):
+        """
+        If the server's transport parameters do not have the correct
+        retry_source_connection_id the connection must fail.
+        """
+
+        def create_protocol(*args, **kwargs):
+            protocol = QuicConnectionProtocol(*args, **kwargs)
+            protocol._quic._retry_source_connection_id = None
+            return protocol
+
+        run(self.run_server(create_protocol=create_protocol, retry=True))
         run(self.run_client_server())
         with self.assertRaises(ConnectionError):
             run(self.run_client())
 
     @patch("aioquic.quic.retry.QuicRetryTokenHandler.validate_token")
-    def test_connect_and_serve_with_stateless_retry_bad(self, mock_validate):
+    def test_connect_and_serve_with_retry_bad_token(self, mock_validate):
         mock_validate.side_effect = ValueError("Decryption failed.")
 
-        run(self.run_server(stateless_retry=True))
+        run(self.run_server(retry=True))
         run(
             self.run_client_server(
                 configuration=QuicConfiguration(

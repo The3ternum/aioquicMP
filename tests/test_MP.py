@@ -93,7 +93,11 @@ def client_and_server(
     )
     server_configuration.load_cert_chain(server_certfile, server_keyfile)
 
-    server = QuicConnection(configuration=server_configuration, **server_kwargs)
+    server = QuicConnection(
+        configuration=server_configuration,
+        original_destination_connection_id=client.original_destination_connection_id,
+        **server_kwargs,
+    )
     server._ack_delay = 0
     disable_packet_pacing(server)
     server_patch(server)

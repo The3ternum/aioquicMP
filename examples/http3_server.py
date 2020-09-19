@@ -1,9 +1,7 @@
 import argparse
 import asyncio
 import importlib
-import json
 import logging
-import os
 import time
 from collections import deque
 from email.utils import formatdate
@@ -20,8 +18,8 @@ from aioquic.h3.events import DataReceived, H3Event, HeadersReceived
 from aioquic.h3.exceptions import NoAvailablePushIDError
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import DatagramFrameReceived, ProtocolNegotiated, QuicEvent
-from aioquic.quic.logger import QuicLogger, QuicLoggerTrace
 from aioquic.tls import SessionTicket
+from examples.quic_logger import QuicDirectoryLogger
 
 try:
     import uvloop
@@ -256,6 +254,7 @@ class HttpServerProtocol(QuicConnectionProtocol):
             else:
                 path_bytes, query_string = raw_path, b""
             path = path_bytes.decode()
+            self._quic._logger.info("HTTP request %s %s", method, path)
 
             # FIXME: add a public API to retrieve peer address
             client_addr = self._http._quic._perceived_remote_addresses[0]
@@ -353,27 +352,6 @@ class SessionTicketStore:
         return self.tickets.pop(label, None)
 
 
-class QuicLoggerCustom(QuicLogger):
-    """
-    Custom QUIC logger which writes one trace per file.
-    """
-
-    def __init__(self, path: str) -> None:
-        if not os.path.isdir(path):
-            raise ValueError("QUIC log output directory '%s' does not exist" % path)
-        self.path = path
-        super().__init__()
-
-    def end_trace(self, trace: QuicLoggerTrace) -> None:
-        trace_dict = trace.to_dict()
-        trace_path = os.path.join(
-            self.path, trace_dict["common_fields"]["ODCID"] + ".qlog"
-        )
-        with open(trace_path, "w") as logger_fp:
-            json.dump({"qlog_version": "draft-01", "traces": [trace_dict]}, logger_fp)
-        self._traces.remove(trace)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="QUIC server")
     parser.add_argument(
@@ -416,13 +394,15 @@ if __name__ == "__main__":
         help="log secrets to a file, for use with Wireshark",
     )
     parser.add_argument(
-        "-q", "--quic-log", type=str, help="log QUIC events to a file in QLOG format"
+        "-q",
+        "--quic-log",
+        type=str,
+        help="log QUIC events to QLOG files in the specified directory",
     )
     parser.add_argument(
-        "-r",
-        "--stateless-retry",
+        "--retry",
         action="store_true",
-        help="send a stateless retry for new connections",
+        help="send a retry for new connections",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
@@ -452,7 +432,7 @@ if __name__ == "__main__":
 
     # create QUIC logger
     if args.quic_log:
-        quic_logger = QuicLoggerCustom(args.quic_log)
+        quic_logger = QuicDirectoryLogger(args.quic_log)
     else:
         quic_logger = None
 
@@ -496,10 +476,51 @@ if __name__ == "__main__":
                 transports=transports,
                 session_ticket_fetcher=ticket_store.pop,
                 session_ticket_handler=ticket_store.add,
-                stateless_retry=args.stateless_retry,
+                retry=args.retry,
             )
         )
     try:
         loop.run_forever()
     except KeyboardInterrupt:
         pass
+
+"""
+def handle_timer1():
+    print("b1")
+    print(loop.time())
+    time.sleep(6)
+    print("e1")
+    print(loop.time())
+
+
+def handle_timer2():
+    print("b2")
+    print(loop.time())
+    time.sleep(1)
+    print("e2")
+    print(loop.time())
+
+
+async def periodic():
+    print("s1")
+    loop.call_at(3, handle_timer1)
+    print("s2")
+    print(loop.time())
+    loop.call_at(4, handle_timer2)
+    print("s3")
+    print(loop.time())
+
+
+def stop():
+    task.cancel()
+
+
+loop = asyncio.get_event_loop()
+loop.call_later(40, stop)
+task = loop.create_task(periodic())
+
+try:
+    loop.run_until_complete(task)
+except asyncio.CancelledError:
+    pass
+"""

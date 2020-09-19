@@ -8,7 +8,6 @@ from typing import List, Optional, Tuple
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from ..buffer import Buffer
-from ..tls import pull_block, push_block
 from .rangeset import RangeSet
 
 PACKET_LONG_HEADER = 0x80
@@ -24,15 +23,17 @@ PACKET_TYPE_MASK = 0xF0
 
 CONNECTION_ID_MAX_SIZE = 20
 PACKET_NUMBER_MAX_SIZE = 4
-RETRY_AEAD_KEY = binascii.unhexlify("4d32ecdb2a2133c841e4043df27d4430")
-RETRY_AEAD_NONCE = binascii.unhexlify("4d1611d05513a552c587d575")
+RETRY_AEAD_KEY_DRAFT_25 = binascii.unhexlify("4d32ecdb2a2133c841e4043df27d4430")
+RETRY_AEAD_KEY_DRAFT_29 = binascii.unhexlify("ccce187ed09a09d05728155a6cb96be1")
+RETRY_AEAD_NONCE_DRAFT_25 = binascii.unhexlify("4d1611d05513a552c587d575")
+RETRY_AEAD_NONCE_DRAFT_29 = binascii.unhexlify("e54930f97f2136f0530a8c1c")
 RETRY_INTEGRITY_TAG_SIZE = 16
 
 
 class QuicErrorCode(IntEnum):
     NO_ERROR = 0x0
     INTERNAL_ERROR = 0x1
-    SERVER_BUSY = 0x2
+    CONNECTION_REFUSED = 0x2
     FLOW_CONTROL_ERROR = 0x3
     STREAM_LIMIT_ERROR = 0x4
     STREAM_STATE_ERROR = 0x5
@@ -42,15 +43,16 @@ class QuicErrorCode(IntEnum):
     CONNECTION_ID_LIMIT_ERROR = 0x9
     PROTOCOL_VIOLATION = 0xA
     INVALID_TOKEN = 0xB
+    APPLICATION_ERROR = 0xC
     CRYPTO_BUFFER_EXCEEDED = 0xD
     CRYPTO_ERROR = 0x100
 
 
 class QuicProtocolVersion(IntEnum):
     NEGOTIATION = 0
-    DRAFT_25 = 0xFF000019
-    DRAFT_26 = 0xFF00001A
     DRAFT_27 = 0xFF00001B
+    DRAFT_28 = 0xFF00001C
+    DRAFT_29 = 0xFF00001D
 
 
 @dataclass
@@ -83,7 +85,7 @@ def decode_packet_number(truncated: int, num_bits: int, expected: int) -> int:
 
 
 def get_retry_integrity_tag(
-    packet_without_tag: bytes, original_destination_cid: bytes
+    packet_without_tag: bytes, original_destination_cid: bytes, version: int
 ) -> bytes:
     """
     Calculate the integrity tag for a RETRY packet.
@@ -95,9 +97,16 @@ def get_retry_integrity_tag(
     buf.push_bytes(packet_without_tag)
     assert buf.eof()
 
+    if version < QuicProtocolVersion.DRAFT_29:
+        aead_key = RETRY_AEAD_KEY_DRAFT_25
+        aead_nonce = RETRY_AEAD_NONCE_DRAFT_25
+    else:
+        aead_key = RETRY_AEAD_KEY_DRAFT_29
+        aead_nonce = RETRY_AEAD_NONCE_DRAFT_29
+
     # run AES-128-GCM
-    aead = AESGCM(RETRY_AEAD_KEY)
-    integrity_tag = aead.encrypt(RETRY_AEAD_NONCE, b"", buf.data)
+    aead = AESGCM(aead_key)
+    integrity_tag = aead.encrypt(aead_nonce, b"", buf.data)
     assert len(integrity_tag) == RETRY_INTEGRITY_TAG_SIZE
     return integrity_tag
 
@@ -201,7 +210,9 @@ def encode_quic_retry(
     buf.push_uint8(len(source_cid))
     buf.push_bytes(source_cid)
     buf.push_bytes(retry_token)
-    buf.push_bytes(get_retry_integrity_tag(buf.data, original_destination_cid))
+    buf.push_bytes(
+        get_retry_integrity_tag(buf.data, original_destination_cid, version=version)
+    )
     assert buf.eof()
     return buf.data
 
@@ -239,10 +250,10 @@ class QuicPreferredAddress:
 
 @dataclass
 class QuicTransportParameters:
-    original_connection_id: Optional[bytes] = None
-    idle_timeout: Optional[int] = None
+    original_destination_connection_id: Optional[bytes] = None
+    max_idle_timeout: Optional[int] = None
     stateless_reset_token: Optional[bytes] = None
-    max_packet_size: Optional[int] = None
+    max_udp_payload_size: Optional[int] = None
     initial_max_data: Optional[int] = None
     initial_max_stream_data_bidi_local: Optional[int] = None
     initial_max_stream_data_bidi_remote: Optional[int] = None
@@ -254,30 +265,35 @@ class QuicTransportParameters:
     disable_active_migration: Optional[bool] = False
     preferred_address: Optional[QuicPreferredAddress] = None
     active_connection_id_limit: Optional[int] = None
+    initial_source_connection_id: Optional[bytes] = None
+    retry_source_connection_id: Optional[bytes] = None
     max_datagram_frame_size: Optional[int] = None
     max_sending_uniflow_id: Optional[int] = None
     quantum_readiness: Optional[bytes] = None
 
 
 PARAMS = {
-    0: ("original_connection_id", bytes),
-    1: ("idle_timeout", int),
-    2: ("stateless_reset_token", bytes),
-    3: ("max_packet_size", int),
-    4: ("initial_max_data", int),
-    5: ("initial_max_stream_data_bidi_local", int),
-    6: ("initial_max_stream_data_bidi_remote", int),
-    7: ("initial_max_stream_data_uni", int),
-    8: ("initial_max_streams_bidi", int),
-    9: ("initial_max_streams_uni", int),
-    10: ("ack_delay_exponent", int),
-    11: ("max_ack_delay", int),
-    12: ("disable_active_migration", bool),
-    13: ("preferred_address", QuicPreferredAddress),
-    14: ("active_connection_id_limit", int),
-    32: ("max_datagram_frame_size", int),
-    64: ("max_sending_uniflow_id", int),
-    3127: ("quantum_readiness", bytes),
+    0x00: ("original_destination_connection_id", bytes),
+    0x01: ("max_idle_timeout", int),
+    0x02: ("stateless_reset_token", bytes),
+    0x03: ("max_udp_payload_size", int),
+    0x04: ("initial_max_data", int),
+    0x05: ("initial_max_stream_data_bidi_local", int),
+    0x06: ("initial_max_stream_data_bidi_remote", int),
+    0x07: ("initial_max_stream_data_uni", int),
+    0x08: ("initial_max_streams_bidi", int),
+    0x09: ("initial_max_streams_uni", int),
+    0x0A: ("ack_delay_exponent", int),
+    0x0B: ("max_ack_delay", int),
+    0x0C: ("disable_active_migration", bool),
+    0x0D: ("preferred_address", QuicPreferredAddress),
+    0x0E: ("active_connection_id_limit", int),
+    0x0F: ("initial_source_connection_id", bytes),
+    0x10: ("retry_source_connection_id", bytes),
+    # extensions
+    0x0020: ("max_datagram_frame_size", int),
+    0x0040: ("max_sending_uniflow_id", int),
+    0x0C37: ("quantum_readiness", bytes),
 }
 
 
@@ -326,87 +342,47 @@ def push_quic_preferred_address(
     buf.push_bytes(preferred_address.stateless_reset_token)
 
 
-def pull_quic_transport_parameters(
-    buf: Buffer, protocol_version: int
-) -> QuicTransportParameters:
+def pull_quic_transport_parameters(buf: Buffer) -> QuicTransportParameters:
     params = QuicTransportParameters()
-
-    if protocol_version < QuicProtocolVersion.DRAFT_27:
-        with pull_block(buf, 2) as length:
-            end = buf.tell() + length
-            while buf.tell() < end:
-                param_id = buf.pull_uint16()
-                param_len = buf.pull_uint16()
-                param_start = buf.tell()
-                if param_id in PARAMS:
-                    # parse known parameter
-                    param_name, param_type = PARAMS[param_id]
-                    if param_type == int:
-                        setattr(params, param_name, buf.pull_uint_var())
-                    elif param_type == bytes:
-                        setattr(params, param_name, buf.pull_bytes(param_len))
-                    elif param_type == QuicPreferredAddress:
-                        setattr(params, param_name, pull_quic_preferred_address(buf))
-                    else:
-                        setattr(params, param_name, True)
-                else:
-                    # skip unknown parameter
-                    buf.pull_bytes(param_len)
-                assert buf.tell() == param_start + param_len
-    else:
-        while not buf.eof():
-            param_id = buf.pull_uint_var()
-            param_len = buf.pull_uint_var()
-            param_start = buf.tell()
-            if param_id in PARAMS:
-                # parse known parameter
-                param_name, param_type = PARAMS[param_id]
-                if param_type == int:
-                    setattr(params, param_name, buf.pull_uint_var())
-                elif param_type == bytes:
-                    setattr(params, param_name, buf.pull_bytes(param_len))
-                elif param_type == QuicPreferredAddress:
-                    setattr(params, param_name, pull_quic_preferred_address(buf))
-                else:
-                    setattr(params, param_name, True)
+    while not buf.eof():
+        param_id = buf.pull_uint_var()
+        param_len = buf.pull_uint_var()
+        param_start = buf.tell()
+        if param_id in PARAMS:
+            # parse known parameter
+            param_name, param_type = PARAMS[param_id]
+            if param_type == int:
+                setattr(params, param_name, buf.pull_uint_var())
+            elif param_type == bytes:
+                setattr(params, param_name, buf.pull_bytes(param_len))
+            elif param_type == QuicPreferredAddress:
+                setattr(params, param_name, pull_quic_preferred_address(buf))
             else:
-                # skip unknown parameter
-                buf.pull_bytes(param_len)
-            assert buf.tell() == param_start + param_len
+                setattr(params, param_name, True)
+        else:
+            # skip unknown parameter
+            buf.pull_bytes(param_len)
+        assert buf.tell() == param_start + param_len
 
     return params
 
 
 def push_quic_transport_parameters(
-    buf: Buffer, params: QuicTransportParameters, protocol_version: int
+    buf: Buffer, params: QuicTransportParameters
 ) -> None:
-    if protocol_version < QuicProtocolVersion.DRAFT_27:
-        with push_block(buf, 2):
-            for param_id, (param_name, param_type) in PARAMS.items():
-                param_value = getattr(params, param_name)
-                if param_value is not None and param_value is not False:
-                    buf.push_uint16(param_id)
-                    with push_block(buf, 2):
-                        if param_type == int:
-                            buf.push_uint_var(param_value)
-                        elif param_type == bytes:
-                            buf.push_bytes(param_value)
-                        elif param_type == QuicPreferredAddress:
-                            push_quic_preferred_address(buf, param_value)
-    else:
-        for param_id, (param_name, param_type) in PARAMS.items():
-            param_value = getattr(params, param_name)
-            if param_value is not None and param_value is not False:
-                param_buf = Buffer(capacity=65536)
-                if param_type == int:
-                    param_buf.push_uint_var(param_value)
-                elif param_type == bytes:
-                    param_buf.push_bytes(param_value)
-                elif param_type == QuicPreferredAddress:
-                    push_quic_preferred_address(param_buf, param_value)
-                buf.push_uint_var(param_id)
-                buf.push_uint_var(param_buf.tell())
-                buf.push_bytes(param_buf.data)
+    for param_id, (param_name, param_type) in PARAMS.items():
+        param_value = getattr(params, param_name)
+        if param_value is not None and param_value is not False:
+            param_buf = Buffer(capacity=65536)
+            if param_type == int:
+                param_buf.push_uint_var(param_value)
+            elif param_type == bytes:
+                param_buf.push_bytes(param_value)
+            elif param_type == QuicPreferredAddress:
+                push_quic_preferred_address(param_buf, param_value)
+            buf.push_uint_var(param_id)
+            buf.push_uint_var(param_buf.tell())
+            buf.push_bytes(param_buf.data)
 
 
 # FRAMES
@@ -477,6 +453,12 @@ PROBING_FRAME_TYPES = frozenset(
         QuicFrameType.MP_NEW_CONNECTION_ID,
     ]
 )
+
+
+@dataclass
+class QuicResetStreamFrame:
+    error_code: int
+    final_size: int
 
 
 @dataclass

@@ -6,7 +6,6 @@
 
 import argparse
 import asyncio
-import json
 import logging
 import ssl
 import time
@@ -14,9 +13,7 @@ from dataclasses import dataclass, field
 from enum import Flag
 from typing import Optional, cast
 
-import requests
-import urllib3
-from http3_client import HttpClient
+import httpx
 
 from aioquic.asyncio import connect
 from aioquic.h0.connection import H0_ALPN
@@ -24,6 +21,8 @@ from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, HeadersReceived, PushPromiseReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.logger import QuicLogger
+from examples.http3_client import HttpClient
+from examples.quic_logger import QuicDirectoryLogger
 
 
 class Result(Flag):
@@ -72,13 +71,14 @@ class Server:
     host: str
     port: int = 4433
     http3: bool = True
+    http3_port: Optional[int] = None
     retry_port: Optional[int] = 4434
     path: str = "/"
     push_path: Optional[str] = None
     result: Result = field(default_factory=lambda: Result(0))
     session_resumption_port: Optional[int] = None
     structured_logging: bool = False
-    throughput_file_suffix: str = ""
+    throughput_path: Optional[str] = "/%(size)d"
     verify_mode: Optional[int] = None
 
 
@@ -88,31 +88,42 @@ SERVERS = [
         "aioquic", "quic.aiortc.org", port=443, push_path="/", structured_logging=True
     ),
     Server("ats", "quic.ogre.com"),
-    Server("f5", "f5quic.com", retry_port=4433),
-    Server("haskell", "mew.org", retry_port=4433),
+    Server("f5", "f5quic.com", retry_port=4433, throughput_path=None),
+    Server(
+        "haskell", "mew.org", structured_logging=True, throughput_path="/num/%(size)s"
+    ),
     Server("gquic", "quic.rocks", retry_port=None),
     Server("lsquic", "http3-test.litespeedtech.com", push_path="/200?push=/100"),
     Server(
         "msquic",
         "quic.westus.cloudapp.azure.com",
-        port=4433,
-        session_resumption_port=4433,
         structured_logging=True,
-        throughput_file_suffix=".txt",
+        throughput_path=None,  # "/%(size)d.txt",
         verify_mode=ssl.CERT_NONE,
     ),
     Server(
-        "mvfst", "fb.mvfst.net", port=443, push_path="/push", structured_logging=True
+        "mvfst",
+        "fb.mvfst.net",
+        port=443,
+        push_path="/push",
+        retry_port=None,
+        structured_logging=True,
     ),
-    Server("ngtcp2", "nghttp2.org", push_path="/?push=/100"),
-    Server("ngx_quic", "cloudflare-quic.com", port=443, retry_port=443),
+    Server(
+        "ngtcp2",
+        "nghttp2.org",
+        push_path="/?push=/100",
+        structured_logging=True,
+        throughput_path=None,
+    ),
+    Server("ngx_quic", "cloudflare-quic.com", port=443, retry_port=None),
     Server("pandora", "pandora.cm.in.tum.de", verify_mode=ssl.CERT_NONE),
     Server("picoquic", "test.privateoctopus.com", structured_logging=True),
-    Server("quant", "quant.eggert.org", http3=False),
-    Server("quic-go", "quic.seemann.io", port=443, retry_port=443),
+    Server("quant", "quant.eggert.org", http3=False, structured_logging=True),
+    Server("quic-go", "interop.seemann.io", port=443, retry_port=443),
     Server("quiche", "quic.tech", port=8443, retry_port=8444),
-    Server("quicly", "quic.examp1e.net"),
-    Server("quinn", "ralith.com"),
+    Server("quicly", "quic.examp1e.net", http3_port=443),
+    Server("quinn", "h3.stammw.eu", port=443),
 ]
 
 
@@ -146,7 +157,11 @@ async def test_handshake_and_close(server: Server, configuration: QuicConfigurat
     server.result |= Result.C
 
 
-async def test_stateless_retry(server: Server, configuration: QuicConfiguration):
+async def test_retry(server: Server, configuration: QuicConfiguration):
+    # skip test if there is not retry port
+    if server.retry_port is None:
+        return
+
     async with connect(
         server.host, server.retry_port, configuration=configuration
     ) as protocol:
@@ -195,13 +210,14 @@ async def test_http_0(server: Server, configuration: QuicConfiguration):
 
 
 async def test_http_3(server: Server, configuration: QuicConfiguration):
+    port = server.http3_port or server.port
     if server.path is None:
         return
 
     configuration.alpn_protocols = H3_ALPN
     async with connect(
         server.host,
-        server.port,
+        port,
         configuration=configuration,
         create_protocol=HttpClient,
     ) as protocol:
@@ -315,38 +331,23 @@ async def test_key_update(server: Server, configuration: QuicConfiguration):
         server.result |= Result.U
 
 
-async def test_migration(server: Server, configuration: QuicConfiguration):
+async def test_server_cid_change(server: Server, configuration: QuicConfiguration):
     async with connect(
         server.host, server.port, configuration=configuration
     ) as protocol:
         # cause some traffic
         await protocol.ping()
 
-        # change connection ID and replace transport
+        # change connection ID
         protocol.change_connection_id(0)
-        for transport in protocol._transports.values():
-            transport.close()
-        await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 
         # cause more traffic
         await protocol.ping()
 
-        # check log
-        dcids = set()
-        for stamp, category, event, data in configuration.quic_logger.to_dict()[
-            "traces"
-        ][0]["events"]:
-            if (
-                category == "transport"
-                and event == "packet_received"
-                and data["packet_type"] == "1RTT"
-            ):
-                dcids.add(data["header"]["dcid"])
-        if len(dcids) == 2:
-            server.result |= Result.M
+        server.result |= Result.M
 
 
-async def test_rebinding(server: Server, configuration: QuicConfiguration):
+async def test_nat_rebinding(server: Server, configuration: QuicConfiguration):
     async with connect(
         server.host, server.port, configuration=configuration
     ) as protocol:
@@ -361,7 +362,61 @@ async def test_rebinding(server: Server, configuration: QuicConfiguration):
         # cause more traffic
         await protocol.ping()
 
-        server.result |= Result.B
+        # check log
+        path_challenges = 0
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
+            if (
+                category == "transport"
+                and event == "packet_received"
+                and data["packet_type"] == "1RTT"
+            ):
+                for frame in data["frames"]:
+                    if frame["frame_type"] == "path_challenge":
+                        path_challenges += 1
+        if not path_challenges:
+            protocol._quic._logger.warning("No PATH_CHALLENGE received")
+        else:
+            server.result |= Result.B
+
+
+async def test_address_mobility(server: Server, configuration: QuicConfiguration):
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        # cause some traffic
+        await protocol.ping()
+
+        # replace transport
+        for transport in protocol._transports.values():
+            transport.close()
+        await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
+
+        # change connection ID
+        protocol.change_connection_id(0)
+
+        # cause more traffic
+        await protocol.ping()
+
+        # check log
+        path_challenges = 0
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
+            if (
+                category == "transport"
+                and event == "packet_received"
+                and data["packet_type"] == "1RTT"
+            ):
+                for frame in data["frames"]:
+                    if frame["frame_type"] == "path_challenge":
+                        path_challenges += 1
+
+        if not path_challenges:
+            protocol._quic._logger.warning("No PATH_CHALLENGE received")
+        else:
+            server.result |= Result.A
 
 
 async def test_spin_bit(server: Server, configuration: QuicConfiguration):
@@ -384,14 +439,16 @@ async def test_spin_bit(server: Server, configuration: QuicConfiguration):
 
 async def test_throughput(server: Server, configuration: QuicConfiguration):
     failures = 0
+    if server.throughput_path is None:
+        return
 
     for size in [5000000, 10000000]:
-        print("Testing %d bytes download" % size)
-        path = "/%d%s" % (size, server.throughput_file_suffix)
+        path = server.throughput_path % {"size": size}
+        print("Testing %d bytes download: %s" % (size, path))
 
         # perform HTTP request over TCP
         start = time.time()
-        response = requests.get("https://" + server.host + path, verify=False)
+        response = httpx.get("https://" + server.host + path, verify=False)
         tcp_octets = len(response.content)
         tcp_elapsed = time.time() - start
         assert tcp_octets == size, "HTTP/TCP response size mismatch"
@@ -399,12 +456,14 @@ async def test_throughput(server: Server, configuration: QuicConfiguration):
         # perform HTTP request over QUIC
         if server.http3:
             configuration.alpn_protocols = H3_ALPN
+            port = server.http3_port or server.port
         else:
             configuration.alpn_protocols = H0_ALPN
+            port = server.port
         start = time.time()
         async with connect(
             server.host,
-            server.port,
+            port,
             configuration=configuration,
             create_protocol=HttpClient,
         ) as protocol:
@@ -448,12 +507,12 @@ async def run(servers, tests, quic_log=False, secrets_log_file=None) -> None:
             configuration = QuicConfiguration(
                 alpn_protocols=H3_ALPN + H0_ALPN,
                 is_client=True,
-                quic_logger=QuicLogger(),
+                quic_logger=QuicDirectoryLogger(quic_log) if quic_log else QuicLogger(),
                 secrets_log_file=secrets_log_file,
                 verify_mode=server.verify_mode,
             )
             if test_name == "test_throughput":
-                timeout = 60
+                timeout = 120
             else:
                 timeout = 10
             try:
@@ -462,10 +521,6 @@ async def run(servers, tests, quic_log=False, secrets_log_file=None) -> None:
                 )
             except Exception as exc:
                 print(exc)
-
-            if quic_log:
-                with open("%s-%s.qlog" % (server.name, test_name), "w") as logger_fp:
-                    json.dump(configuration.quic_logger.to_dict(), logger_fp, indent=4)
 
         print("")
         print_result(server)
@@ -482,8 +537,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "-q",
         "--quic-log",
-        action="store_true",
-        help="log QUIC events to a file in QLOG format",
+        type=str,
+        help="log QUIC events to QLOG files in the specified directory",
     )
     parser.add_argument(
         "--server", type=str, help="only run against the specified server."
@@ -519,9 +574,6 @@ if __name__ == "__main__":
         servers = list(filter(lambda x: x.name == args.server, servers))
     if args.test:
         tests = list(filter(lambda x: x[0] == args.test, tests))
-
-    # disable requests SSL warnings
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(

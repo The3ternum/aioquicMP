@@ -25,7 +25,7 @@ aioquic
     :target: https://github.com/python/black
 
 ``MultiPath`` implementation
-------------------------
+----------------------------
 This repository implements the Mutlipath Extension for quic in aioquic
 The implementation is still in progress and follows the draft of Q. De Coninck
 and O. Bonaventure (https://datatracker.ietf.org/doc/draft-deconinck-quic-multipath/)
@@ -57,8 +57,8 @@ different concurrency models.
 Features
 --------
 
-- QUIC stack conforming with draft-27
-- HTTP/3 stack conforming with draft-27
+- QUIC stack conforming with draft-28
+- HTTP/3 stack conforming with draft-28
 - minimal TLS 1.3 implementation
 - IPv4 and IPv6 support
 - connection migration and NAT rebinding
@@ -121,42 +121,9 @@ You will need to set some environment variables to link against OpenSSL:
 Running the examples
 --------------------
 
-After checking out the code using git you can run:
+`aioquic` comes with a number of examples illustrating various QUIC usecases.
 
-.. code-block:: console
-
-   $ pip install -e .
-   $ pip install aiofiles asgiref httpbin starlette wsproto
-
-HTTP/3 server
-.............
-
-You can run the example server, which handles both HTTP/0.9 and HTTP/3:
-
-.. code-block:: console
-
-   $ python examples/http3_server.py --certificate tests/ssl_cert.pem --private-key tests/ssl_key.pem --multipath 4
-
-HTTP/3 client
-.............
-
-You can run the example client to perform an HTTP/3 request:
-
-.. code-block:: console
-
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --multipath 4 https://localhost:4433/
-
-Alternatively you can perform an HTTP/0.9 request:
-
-.. code-block:: console
-
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --legacy-http --multipath 4 https://localhost:4433/
-
-You can also open a WebSocket over HTTP/3:
-
-.. code-block:: console
-
-  $ python examples/http3_client.py --ca-certs tests/pycacert.pem --multipath 4 wss://localhost:4433/ws
+You can browse these examples here: https://github.com/The3ternum/aioquicMP/tree/master/main/examples
 
 License
 -------

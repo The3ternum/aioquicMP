@@ -1,13 +1,12 @@
 import argparse
 import asyncio
-import json
 import logging
 import os
 import pickle
 import ssl
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, List, Optional, Union, cast
+from typing import BinaryIO, Callable, Deque, Dict, List, Optional, Union, cast
 from urllib.parse import urlparse
 
 import wsproto
@@ -26,8 +25,8 @@ from aioquic.h3.events import (
 )
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent
-from aioquic.quic.logger import QuicLogger
-from aioquic.tls import SessionTicket
+from aioquic.tls import CipherSuite, SessionTicket
+from examples.quic_logger import QuicDirectoryLogger
 
 try:
     import uvloop
@@ -206,7 +205,7 @@ class HttpClient(QuicConnectionProtocol):
             for http_event in self._http.handle_event(event):
                 self.http_event_received(http_event)
 
-    async def _request(self, request: HttpRequest):
+    async def _request(self, request: HttpRequest) -> Deque[H3Event]:
         stream_id = self._quic.get_next_available_stream_id()
         self._http.send_headers(
             stream_id=stream_id,
@@ -244,8 +243,10 @@ async def perform_http_request(
             data=data.encode(),
             headers={"content-type": "application/x-www-form-urlencoded"},
         )
+        method = "POST"
     else:
         http_events = await client.get(url)
+        method = "GET"
     elapsed = time.time() - start
 
     # print speed
@@ -254,8 +255,8 @@ async def perform_http_request(
         if isinstance(http_event, DataReceived):
             octets += len(http_event.data)
     logger.info(
-        "Received %d bytes in %.1f s (%.3f Mbps)"
-        % (octets, elapsed, octets * 8 / elapsed / 1000000)
+        "Response received for %s %s : %d bytes in %.1f s (%.3f Mbps)"
+        % (method, urlparse(url).path, octets, elapsed, octets * 8 / elapsed / 1000000)
     )
 
     # output response
@@ -264,15 +265,54 @@ async def perform_http_request(
             output_dir, os.path.basename(urlparse(url).path) or "index.html"
         )
         with open(output_path, "wb") as output_file:
-            for http_event in http_events:
-                if isinstance(http_event, HeadersReceived) and include:
-                    headers = b""
-                    for k, v in http_event.headers:
-                        headers += k + b": " + v + b"\r\n"
-                    if headers:
-                        output_file.write(headers + b"\r\n")
-                elif isinstance(http_event, DataReceived):
-                    output_file.write(http_event.data)
+            write_response(
+                http_events=http_events, include=include, output_file=output_file
+            )
+
+
+def process_http_pushes(
+    client: HttpClient,
+    include: bool,
+    output_dir: Optional[str],
+) -> None:
+    for _, http_events in client.pushes.items():
+        method = ""
+        octets = 0
+        path = ""
+        for http_event in http_events:
+            if isinstance(http_event, DataReceived):
+                octets += len(http_event.data)
+            elif isinstance(http_event, PushPromiseReceived):
+                for header, value in http_event.headers:
+                    if header == b":method":
+                        method = value.decode()
+                    elif header == b":path":
+                        path = value.decode()
+        logger.info("Push received for %s %s : %s bytes", method, path, octets)
+
+        # output response
+        if output_dir is not None:
+            output_path = os.path.join(
+                output_dir, os.path.basename(path) or "index.html"
+            )
+            with open(output_path, "wb") as output_file:
+                write_response(
+                    http_events=http_events, include=include, output_file=output_file
+                )
+
+
+def write_response(
+    http_events: Deque[H3Event], output_file: BinaryIO, include: bool
+) -> None:
+    for http_event in http_events:
+        if isinstance(http_event, HeadersReceived) and include:
+            headers = b""
+            for k, v in http_event.headers:
+                headers += k + b": " + v + b"\r\n"
+            if headers:
+                output_file.write(headers + b"\r\n")
+        elif isinstance(http_event, DataReceived):
+            output_file.write(http_event.data)
 
 
 def save_session_ticket(ticket: SessionTicket) -> None:
@@ -292,6 +332,7 @@ async def run(
     include: bool,
     output_dir: Optional[str],
     server: asyncio.DatagramProtocol,
+    zero_rtt: bool,
 ) -> None:
     # parse URL
     parsed = urlparse(urls[0])
@@ -311,6 +352,7 @@ async def run(
         port,
         create_protocol=HttpClient,
         session_ticket_handler=save_session_ticket,
+        wait_connected=not zero_rtt,
     )
     protocol = cast(HttpClient, protocol)
 
@@ -341,6 +383,9 @@ async def run(
         ]
         await asyncio.gather(*coros)
 
+        # process http pushes
+        process_http_pushes(client=protocol, include=include, output_dir=output_dir)
+
     await server.close_protocol()
 
 
@@ -353,6 +398,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--ca-certs", type=str, help="load CA certificates from the specified file"
+    )
+    parser.add_argument(
+        "--cipher-suites",
+        type=str,
+        help="only advertise the given cipher suites, e.g. `AES_256_GCM_SHA384,CHACHA20_POLY1305_SHA256`",
     )
     parser.add_argument(
         "-d", "--data", type=str, help="send the specified data in a POST request"
@@ -386,7 +436,10 @@ if __name__ == "__main__":
         help="write downloaded files to this directory",
     )
     parser.add_argument(
-        "-q", "--quic-log", type=str, help="log QUIC events to a file in QLOG format"
+        "-q",
+        "--quic-log",
+        type=str,
+        help="log QUIC events to QLOG files in the specified directory",
     )
     parser.add_argument(
         "-l",
@@ -428,6 +481,9 @@ if __name__ == "__main__":
         default=0,
         help="Set the maximum number of sending uniflows",
     )
+    parser.add_argument(
+        "--zero-rtt", action="store_true", help="try to send requests using 0-RTT"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -453,6 +509,10 @@ if __name__ == "__main__":
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)
+    if args.cipher_suites:
+        configuration.cipher_suites = [
+            CipherSuite[s] for s in args.cipher_suites.split(",")
+        ]
     if args.insecure:
         configuration.verify_mode = ssl.CERT_NONE
     if args.max_data:
@@ -460,7 +520,7 @@ if __name__ == "__main__":
     if args.max_stream_data:
         configuration.max_stream_data = args.max_stream_data
     if args.quic_log:
-        configuration.quic_logger = QuicLogger()
+        configuration.quic_logger = QuicDirectoryLogger(args.quic_log)
     if args.secrets_log:
         configuration.secrets_log_file = open(args.secrets_log, "a")
     if args.session_ticket:
@@ -476,27 +536,23 @@ if __name__ == "__main__":
     if uvloop is not None:
         uvloop.install()
     loop = asyncio.get_event_loop()
-    try:
-        for port in ports:
-            loop.run_until_complete(
-                serve_client(
-                    args.host,
-                    port,
-                    configuration=configuration,
-                    transports=transports,
-                    servers=servers,
-                )
-            )
+    for port in ports:
         loop.run_until_complete(
-            run(
-                urls=args.url,
-                data=args.data,
-                include=args.include,
-                output_dir=args.output_dir,
-                server=servers[str(args.preferred_port)],
+            serve_client(
+                args.host,
+                port,
+                configuration=configuration,
+                transports=transports,
+                servers=servers,
             )
         )
-    finally:
-        if configuration.quic_logger is not None:
-            with open(args.quic_log, "w") as logger_fp:
-                json.dump(configuration.quic_logger.to_dict(), logger_fp, indent=4)
+    loop.run_until_complete(
+        run(
+            urls=args.url,
+            data=args.data,
+            include=args.include,
+            output_dir=args.output_dir,
+            server=servers[str(args.preferred_port)],
+            zero_rtt=args.zero_rtt,
+        )
+    )

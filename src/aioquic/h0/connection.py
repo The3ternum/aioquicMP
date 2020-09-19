@@ -4,7 +4,7 @@ from aioquic.h3.events import DataReceived, H3Event, Headers, HeadersReceived
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import QuicEvent, StreamDataReceived
 
-H0_ALPN = ["hq-27", "hq-26", "hq-25"]
+H0_ALPN = ["hq-29", "hq-28", "hq-27"]
 
 
 class H0Connection:
@@ -13,6 +13,7 @@ class H0Connection:
     """
 
     def __init__(self, quic: QuicConnection):
+        self._buffer: Dict[int, bytes] = {}
         self._headers_received: Dict[int, bool] = {}
         self._is_client = quic.configuration.is_client
         self._quic = quic
@@ -21,7 +22,7 @@ class H0Connection:
         http_events: List[H3Event] = []
 
         if isinstance(event, StreamDataReceived) and (event.stream_id % 4) == 0:
-            data = event.data
+            data = self._buffer.pop(event.stream_id, b"") + event.data
             if not self._headers_received.get(event.stream_id, False):
                 if self._is_client:
                     http_events.append(
@@ -29,7 +30,7 @@ class H0Connection:
                             headers=[], stream_ended=False, stream_id=event.stream_id
                         )
                     )
-                else:
+                elif data.endswith(b"\r\n") or event.end_stream:
                     method, path = data.rstrip().split(b" ", 1)
                     http_events.append(
                         HeadersReceived(
@@ -39,6 +40,10 @@ class H0Connection:
                         )
                     )
                     data = b""
+                else:
+                    # incomplete request, stash the data
+                    self._buffer[event.stream_id] = data
+                    return http_events
                 self._headers_received[event.stream_id] = True
 
             http_events.append(

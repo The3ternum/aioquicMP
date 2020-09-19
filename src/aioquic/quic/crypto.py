@@ -1,9 +1,9 @@
 import binascii
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from .._crypto import AEAD, CryptoError, HeaderProtection
 from ..tls import CipherSuite, cipher_suite_hash, hkdf_expand_label, hkdf_extract
-from .packet import decode_packet_number, is_long_header
+from .packet import QuicProtocolVersion, decode_packet_number, is_long_header
 
 CIPHER_SUITES = {
     CipherSuite.AES_128_GCM_SHA256: (b"aes-128-ecb", b"aes-128-gcm"),
@@ -11,8 +11,16 @@ CIPHER_SUITES = {
     CipherSuite.CHACHA20_POLY1305_SHA256: (b"chacha20", b"chacha20-poly1305"),
 }
 INITIAL_CIPHER_SUITE = CipherSuite.AES_128_GCM_SHA256
-INITIAL_SALT = binascii.unhexlify("c3eef712c72ebb5a11a7d2432bb46365bef9f502")
+INITIAL_SALT_DRAFT_23 = binascii.unhexlify("c3eef712c72ebb5a11a7d2432bb46365bef9f502")
+INITIAL_SALT_DRAFT_29 = binascii.unhexlify("afbfec289993d24c9e9786f19c6111e04390a899")
 SAMPLE_SIZE = 16
+
+
+Callback = Callable[[str], None]
+
+
+def NoCallback(trigger: str) -> None:
+    pass
 
 
 class KeyUnavailableError(CryptoError):
@@ -38,13 +46,20 @@ def derive_key_iv_hp(
 
 
 class CryptoContext:
-    def __init__(self, key_phase: int = 0) -> None:
+    def __init__(
+        self,
+        key_phase: int = 0,
+        setup_cb: Callback = NoCallback,
+        teardown_cb: Callback = NoCallback,
+    ) -> None:
         self.aead: Optional[AEAD] = None
         self.cipher_suite: Optional[CipherSuite] = None
         self.hp: Optional[HeaderProtection] = None
         self.key_phase = key_phase
         self.secret: Optional[bytes] = None
         self.version: Optional[int] = None
+        self._setup_cb = setup_cb
+        self._teardown_cb = teardown_cb
 
     def decrypt_packet(
         self, packet: bytes, encrypted_offset: int, expected_packet_number: int
@@ -102,17 +117,26 @@ class CryptoContext:
         self.secret = secret
         self.version = version
 
+        # trigger callback
+        self._setup_cb("tls")
+
     def teardown(self) -> None:
         self.aead = None
         self.cipher_suite = None
         self.hp = None
         self.secret = None
 
+        # trigger callback
+        self._teardown_cb("tls")
 
-def apply_key_phase(self: CryptoContext, crypto: CryptoContext) -> None:
+
+def apply_key_phase(self: CryptoContext, crypto: CryptoContext, trigger: str) -> None:
     self.aead = crypto.aead
     self.key_phase = crypto.key_phase
     self.secret = crypto.secret
+
+    # trigger callback
+    self._setup_cb(trigger)
 
 
 def next_key_phase(self: CryptoContext) -> CryptoContext:
@@ -130,10 +154,16 @@ def next_key_phase(self: CryptoContext) -> CryptoContext:
 
 
 class CryptoPair:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        recv_setup_cb: Callback = NoCallback,
+        recv_teardown_cb: Callback = NoCallback,
+        send_setup_cb: Callback = NoCallback,
+        send_teardown_cb: Callback = NoCallback,
+    ) -> None:
         self.aead_tag_size = 16
-        self.recv = CryptoContext()
-        self.send = CryptoContext()
+        self.recv = CryptoContext(setup_cb=recv_setup_cb, teardown_cb=recv_teardown_cb)
+        self.send = CryptoContext(setup_cb=send_setup_cb, teardown_cb=send_teardown_cb)
         self._update_key_requested = False
 
     def decrypt_packet(
@@ -143,14 +173,14 @@ class CryptoPair:
             packet, encrypted_offset, expected_packet_number
         )
         if update_key:
-            self._update_key()
+            self._update_key("remote_update")
         return plain_header, payload, packet_number
 
     def encrypt_packet(
         self, plain_header: bytes, plain_payload: bytes, packet_number: int
     ) -> bytes:
         if self._update_key_requested:
-            self._update_key()
+            self._update_key("local_update")
         return self.send.encrypt_packet(plain_header, plain_payload, packet_number)
 
     def setup_initial(self, cid: bytes, is_client: bool, version: int) -> None:
@@ -159,8 +189,13 @@ class CryptoPair:
         else:
             recv_label, send_label = b"client in", b"server in"
 
+        if version < QuicProtocolVersion.DRAFT_29:
+            initial_salt = INITIAL_SALT_DRAFT_23
+        else:
+            initial_salt = INITIAL_SALT_DRAFT_29
+
         algorithm = cipher_suite_hash(INITIAL_CIPHER_SUITE)
-        initial_secret = hkdf_extract(algorithm, INITIAL_SALT, cid)
+        initial_secret = hkdf_extract(algorithm, initial_salt, cid)
         self.recv.setup(
             cipher_suite=INITIAL_CIPHER_SUITE,
             secret=hkdf_expand_label(
@@ -190,7 +225,7 @@ class CryptoPair:
         else:
             return self.recv.key_phase
 
-    def _update_key(self) -> None:
-        apply_key_phase(self.recv, next_key_phase(self.recv))
-        apply_key_phase(self.send, next_key_phase(self.send))
+    def _update_key(self, trigger: str) -> None:
+        apply_key_phase(self.recv, next_key_phase(self.recv), trigger=trigger)
+        apply_key_phase(self.send, next_key_phase(self.send), trigger=trigger)
         self._update_key_requested = False
