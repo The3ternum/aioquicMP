@@ -3,11 +3,11 @@ import asyncio
 import logging
 import pickle
 import ssl
-from typing import Optional, cast
+from typing import Dict, Optional, cast
 
 from dnslib.dns import QTYPE, DNSQuestion, DNSRecord
 
-from aioquic.asyncio.client import connect
+from aioquic.asyncio.client import QuicClient, serve_client
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent, StreamDataReceived
@@ -55,23 +55,25 @@ def save_session_ticket(ticket):
 
 
 async def run(
-    configuration: QuicConfiguration,
     host: str,
     port: int,
     query_type: str,
     dns_query: str,
+    server: QuicClient,
 ) -> None:
     logger.debug(f"Connecting to {host}:{port}")
-    async with connect(
+    protocol = await server.create_protocol(
         host,
         port,
-        configuration=configuration,
-        session_ticket_handler=save_session_ticket,
         create_protocol=DoQClient,
-    ) as client:
-        client = cast(DoQClient, client)
-        logger.debug("Sending DNS query")
-        await client.query(query_type, dns_query)
+        session_ticket_handler=save_session_ticket,
+    )
+    protocol = cast(DoQClient, protocol)
+
+    logger.debug("Sending DNS query")
+    await protocol.query(query_type, dns_query)
+
+    await server.close_protocol()
 
 
 if __name__ == "__main__":
@@ -118,6 +120,31 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
+    parser.add_argument(
+        "--local-host",
+        type=str,
+        default="::",
+        help="listen on the specified address (defaults to ::)",
+    )
+    parser.add_argument(
+        "--local-ports",
+        type=str,
+        default="5533 5544 5555",
+        help="listen on the specified port (defaults to 5533, 5544, 5555)",
+    )
+    parser.add_argument(
+        "--local-preferred-port",
+        type=str,
+        default="5533",
+        help="Send the request from the specified port",
+    )
+    parser.add_argument(
+        "-m",
+        "--multipath",
+        type=int,
+        default=0,
+        help="Set the maximum number of sending uniflows",
+    )
 
     args = parser.parse_args()
 
@@ -126,8 +153,18 @@ if __name__ == "__main__":
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
 
+    # collect the ports
+    local_ports = args.local_ports.split(" ")
+    local_ports = [int(p) for p in local_ports]
+
+    # get max number of sending uniflows
+    max_sending_uniflows_id = args.multipath
+
     configuration = QuicConfiguration(
-        alpn_protocols=["dq"], is_client=True, max_datagram_frame_size=65536
+        alpn_protocols=["dq"],
+        is_client=True,
+        max_datagram_frame_size=65536,
+        max_sending_uniflow_id=max_sending_uniflows_id,
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)
@@ -147,13 +184,26 @@ if __name__ == "__main__":
     else:
         logger.debug("No session ticket defined...")
 
+    servers: Dict[str, QuicClient] = {}
+    transports: Dict[str, asyncio.DatagramTransport] = {}
+
     loop = asyncio.get_event_loop()
+    for local_port in local_ports:
+        loop.run_until_complete(
+            serve_client(
+                args.local_host,
+                local_port,
+                configuration=configuration,
+                transports=transports,
+                servers=servers,
+            )
+        )
     loop.run_until_complete(
         run(
-            configuration=configuration,
             host=args.host,
             port=args.port,
             query_type=args.dns_type,
             dns_query=args.query,
+            server=servers[str(args.local_preferred_port)],
         )
     )

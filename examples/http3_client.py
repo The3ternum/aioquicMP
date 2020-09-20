@@ -331,7 +331,7 @@ async def run(
     data: str,
     include: bool,
     output_dir: Optional[str],
-    server: asyncio.DatagramProtocol,
+    server: QuicClient,
     zero_rtt: bool,
 ) -> None:
     # parse URL
@@ -346,7 +346,6 @@ async def run(
     else:
         host = parsed.netloc
         port = 443
-    server = cast(QuicClient, server)
     protocol = await server.create_protocol(
         host,
         port,
@@ -457,19 +456,19 @@ if __name__ == "__main__":
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
     parser.add_argument(
-        "--host",
+        "--local-host",
         type=str,
         default="::",
         help="listen on the specified address (defaults to ::)",
     )
     parser.add_argument(
-        "--ports",
+        "--local-ports",
         type=str,
         default="5533 5544 5555",
         help="listen on the specified port (defaults to 5533, 5544, 5555)",
     )
     parser.add_argument(
-        "--preferred-port",
+        "--local-preferred-port",
         type=str,
         default="5533",
         help="Send the request from the specified port",
@@ -492,8 +491,8 @@ if __name__ == "__main__":
     )
 
     # collect the ports
-    ports = args.ports.split(" ")
-    ports = [int(p) for p in ports]
+    local_ports = args.local_ports.split(" ")
+    local_ports = [int(p) for p in local_ports]
 
     # get max number of sending uniflows
     max_sending_uniflows_id = args.multipath
@@ -530,17 +529,17 @@ if __name__ == "__main__":
         except FileNotFoundError:
             pass
 
-    servers: Dict[str, asyncio.DatagramProtocol] = {}
+    servers: Dict[str, QuicClient] = {}
     transports: Dict[str, asyncio.DatagramTransport] = {}
 
     if uvloop is not None:
         uvloop.install()
     loop = asyncio.get_event_loop()
-    for port in ports:
+    for local_port in local_ports:
         loop.run_until_complete(
             serve_client(
-                args.host,
-                port,
+                args.local_host,
+                local_port,
                 configuration=configuration,
                 transports=transports,
                 servers=servers,
@@ -552,7 +551,7 @@ if __name__ == "__main__":
             data=args.data,
             include=args.include,
             output_dir=args.output_dir,
-            server=servers[str(args.preferred_port)],
+            server=servers[str(args.local_preferred_port)],
             zero_rtt=args.zero_rtt,
         )
     )

@@ -3162,47 +3162,47 @@ class QuicConnection:
                     self._write_retire_connection_id_frame(
                         builder=builder, sequence_number=sequence_number
                     )
+                if self._peer_mp_support:
+                    # MP_NEW_CONNECTION_ID
+                    for runiflow in self._receiving_uniflows.values():
+                        if runiflow.uniflow_id != 0:
+                            for connection_id in runiflow.cid_available:
+                                if not connection_id.was_sent:
+                                    self._write_mp_new_connection_id_frame(
+                                        builder=builder,
+                                        connection_id=connection_id,
+                                        uniflow_id=runiflow.uniflow_id,
+                                    )
 
-                # MP_NEW_CONNECTION_ID
-                for runiflow in self._receiving_uniflows.values():
-                    if runiflow.uniflow_id != 0:
-                        for connection_id in runiflow.cid_available:
-                            if not connection_id.was_sent:
-                                self._write_mp_new_connection_id_frame(
+                    # MP_RETIRE_CONNECTION_ID
+                    for suniflow in self._sending_uniflows.values():
+                        if suniflow.uniflow_id != 0:
+                            while suniflow.retire_connection_ids:
+                                sequence_number = suniflow.retire_connection_ids.pop(0)
+                                self._write_mp_retire_connection_id_frame(
                                     builder=builder,
-                                    connection_id=connection_id,
-                                    uniflow_id=runiflow.uniflow_id,
+                                    sequence_number=sequence_number,
+                                    uniflow_id=suniflow.uniflow_id,
                                 )
 
-                # MP_RETIRE_CONNECTION_ID
-                for suniflow in self._sending_uniflows.values():
-                    if suniflow.uniflow_id != 0:
-                        while suniflow.retire_connection_ids:
-                            sequence_number = suniflow.retire_connection_ids.pop(0)
-                            self._write_mp_retire_connection_id_frame(
-                                builder=builder,
-                                sequence_number=sequence_number,
-                                uniflow_id=suniflow.uniflow_id,
-                            )
+                    # ADD_ADDRESS
+                    for laddr in self._local_addresses.values():
+                        if not laddr.was_sent:
+                            self._write_add_address_frame(builder=builder, address=laddr)
 
-                # ADD_ADDRESS
-                for laddr in self._local_addresses.values():
-                    if not laddr.was_sent:
-                        self._write_add_address_frame(builder=builder, address=laddr)
+                    # REMOVE_ADDRESS
+                    while self._removed_addresses:
+                        address_id = self._removed_addresses.pop(0)
+                        self._write_remove_address_frame(
+                            builder=builder, address=self._local_addresses[address_id]
+                        )
 
-                # REMOVE_ADDRESS
-                while self._removed_addresses:
-                    address_id = self._removed_addresses.pop(0)
-                    self._write_remove_address_frame(
-                        builder=builder, address=self._local_addresses[address_id]
-                    )
-
-                # UNIFLOWS
-                if self._uniflows_pending:
-                    self._uniflows_pending = False
-                    self._write_uniflows_frame(
-                        builder=builder, sequence_number=self._uniflows_seq
-                    )
+                    # UNIFLOWS
+                    if self._uniflows_pending:
+                        self._uniflows_pending = False
+                        self._write_uniflows_frame(
+                            builder=builder, sequence_number=self._uniflows_seq
+                        )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:

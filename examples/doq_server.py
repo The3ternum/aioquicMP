@@ -80,9 +80,9 @@ if __name__ == "__main__":
         help="listen on the specified address (defaults to ::)",
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=4784,
+        "--ports",
+        type=str,
+        default="4784 4785 4786",
         help="listen on the specified port (defaults to 4784)",
     )
     parser.add_argument(
@@ -119,8 +119,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
+    parser.add_argument(
+        "-m",
+        "--multipath",
+        type=int,
+        default=0,
+        help="Set the maximum number of sending uniflows",
+    )
 
     args = parser.parse_args()
+
+    # collect the ports
+    ports = args.ports.split(" ")
+    ports = [int(p) for p in ports]
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -132,11 +143,15 @@ if __name__ == "__main__":
     else:
         quic_logger = None
 
+    # get max number of sending uniflows
+    max_sending_uniflows_id = args.multipath
+
     configuration = QuicConfiguration(
         alpn_protocols=["dq"],
         is_client=False,
         max_datagram_frame_size=65536,
         quic_logger=quic_logger,
+        max_sending_uniflow_id=max_sending_uniflows_id,
     )
 
     configuration.load_cert_chain(args.certificate, args.private_key)
@@ -149,19 +164,20 @@ if __name__ == "__main__":
     if uvloop is not None:
         uvloop.install()
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        serve(
-            args.host,
-            args.port,
-            configuration=configuration,
-            create_protocol=DnsServerProtocol,
-            protocols=protocols,
-            transports=transports,
-            session_ticket_fetcher=ticket_store.pop,
-            session_ticket_handler=ticket_store.add,
-            retry=args.retry,
+    for port in ports:
+        loop.run_until_complete(
+            serve(
+                args.host,
+                port,
+                configuration=configuration,
+                create_protocol=DnsServerProtocol,
+                protocols=protocols,
+                transports=transports,
+                session_ticket_fetcher=ticket_store.pop,
+                session_ticket_handler=ticket_store.add,
+                retry=args.retry,
+            )
         )
-    )
     try:
         loop.run_forever()
     except KeyboardInterrupt:

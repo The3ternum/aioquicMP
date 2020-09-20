@@ -2,14 +2,13 @@ import argparse
 import asyncio
 import logging
 import ssl
-from typing import Optional, cast
+from typing import Dict, Optional, cast
 
-from quic_logger import QuicDirectoryLogger
-
-from aioquic.asyncio.client import connect
+from aioquic.asyncio.client import QuicClient, serve_client
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import DatagramFrameReceived, QuicEvent
+from examples.quic_logger import QuicDirectoryLogger
 
 logger = logging.getLogger("client")
 
@@ -37,14 +36,19 @@ class SiduckClient(QuicConnectionProtocol):
                 waiter.set_result(None)
 
 
-async def run(configuration: QuicConfiguration, host: str, port: int) -> None:
-    async with connect(
-        host, port, configuration=configuration, create_protocol=SiduckClient
-    ) as client:
-        client = cast(SiduckClient, client)
-        logger.info("sending quack")
-        await client.quack()
-        logger.info("received quack-ack")
+async def run(host: str, port: int, server: QuicClient) -> None:
+    protocol = await server.create_protocol(
+        host,
+        port,
+        create_protocol=SiduckClient,
+    )
+    protocol = cast(SiduckClient, protocol)
+
+    logger.info("sending quack")
+    await protocol.quack()
+    logger.info("received quack-ack")
+
+    await server.close_protocol()
 
 
 if __name__ == "__main__":
@@ -74,6 +78,31 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
+    parser.add_argument(
+        "--local-host",
+        type=str,
+        default="::",
+        help="listen on the specified address (defaults to ::)",
+    )
+    parser.add_argument(
+        "--local-ports",
+        type=str,
+        default="5533 5544 5555",
+        help="listen on the specified port (defaults to 5533, 5544, 5555)",
+    )
+    parser.add_argument(
+        "--local-preferred-port",
+        type=str,
+        default="5533",
+        help="Send the request from the specified port",
+    )
+    parser.add_argument(
+        "-m",
+        "--multipath",
+        type=int,
+        default=0,
+        help="Set the maximum number of sending uniflows",
+    )
 
     args = parser.parse_args()
 
@@ -82,8 +111,18 @@ if __name__ == "__main__":
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
 
+    # collect the ports
+    local_ports = args.local_ports.split(" ")
+    local_ports = [int(p) for p in local_ports]
+
+    # get max number of sending uniflows
+    max_sending_uniflows_id = args.multipath
+
     configuration = QuicConfiguration(
-        alpn_protocols=["siduck"], is_client=True, max_datagram_frame_size=65536
+        alpn_protocols=["siduck"],
+        is_client=True,
+        max_datagram_frame_size=65536,
+        max_sending_uniflow_id=max_sending_uniflows_id,
     )
     if args.insecure:
         configuration.verify_mode = ssl.CERT_NONE
@@ -92,7 +131,24 @@ if __name__ == "__main__":
     if args.secrets_log:
         configuration.secrets_log_file = open(args.secrets_log, "a")
 
+    servers: Dict[str, QuicClient] = {}
+    transports: Dict[str, asyncio.DatagramTransport] = {}
+
     loop = asyncio.get_event_loop()
+    for local_port in local_ports:
+        loop.run_until_complete(
+            serve_client(
+                args.local_host,
+                local_port,
+                configuration=configuration,
+                transports=transports,
+                servers=servers,
+            )
+        )
     loop.run_until_complete(
-        run(configuration=configuration, host=args.host, port=args.port)
+        run(
+            host=args.host,
+            port=args.port,
+            server=servers[str(args.local_preferred_port)],
+        )
     )
