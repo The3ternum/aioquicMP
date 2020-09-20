@@ -3188,7 +3188,9 @@ class QuicConnection:
                     # ADD_ADDRESS
                     for laddr in self._local_addresses.values():
                         if not laddr.was_sent:
-                            self._write_add_address_frame(builder=builder, address=laddr)
+                            self._write_add_address_frame(
+                                builder=builder, address=laddr
+                            )
 
                     # REMOVE_ADDRESS
                     while self._removed_addresses:

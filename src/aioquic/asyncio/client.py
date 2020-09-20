@@ -17,7 +17,7 @@ class QuicClient(asyncio.DatagramProtocol):
         configuration: QuicConfiguration,
         transports: Dict[str, asyncio.DatagramTransport],
         stream_handler: Optional[QuicStreamHandler] = None,
-        servers: Dict[str, asyncio.DatagramProtocol],
+        servers: Dict,  # Dict[str, QuicClient]
     ) -> None:
         self.identity: Optional[NetworkAddress] = None
         self._configuration = configuration
@@ -28,12 +28,12 @@ class QuicClient(asyncio.DatagramProtocol):
         self._stream_handler = stream_handler
         self._servers = servers
 
-    def close(self):
+    def close(self) -> None:
         if self._protocol:
             self._protocol.close()
         self._transport.close()
 
-    def set_protocol(self, protocol: QuicConnectionProtocol):
+    def set_protocol(self, protocol: QuicConnectionProtocol) -> None:
         self._protocol = protocol
 
     async def create_protocol(
@@ -115,7 +115,7 @@ async def serve_client(
     configuration: QuicConfiguration,
     transports: Dict[str, asyncio.DatagramTransport],
     stream_handler: QuicStreamHandler = None,
-    servers: Dict[str, asyncio.DatagramProtocol],
+    servers: Dict[str, QuicClient],
 ) -> QuicClient:
     """
     Start a QUIC client at the given `host` and `port`.

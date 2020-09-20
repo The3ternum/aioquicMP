@@ -21,7 +21,6 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent
 from examples.quic_logger import QuicDirectoryLogger
 
-
 logger = logging.getLogger("client")
 
 
