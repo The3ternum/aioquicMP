@@ -13,7 +13,7 @@ from httpx.config import Timeout
 from httpx.dispatch.base import AsyncDispatcher
 from httpx.models import Request, Response
 
-from aioquic.asyncio.client import QuicClient, serve_client
+from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, H3Event, HeadersReceived

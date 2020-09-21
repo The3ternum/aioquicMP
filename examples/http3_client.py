@@ -13,7 +13,7 @@ import wsproto
 import wsproto.events
 
 import aioquic
-from aioquic.asyncio.client import QuicClient, serve_client
+from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h0.connection import H0_ALPN, H0Connection
 from aioquic.h3.connection import H3_ALPN, H3Connection
@@ -327,11 +327,14 @@ def save_session_ticket(ticket: SessionTicket) -> None:
 
 
 async def run(
+    local_host: str,
+    local_ports: List[int],
+    local_preferred_port: int,
+    configuration: QuicConfiguration,
     urls: List[str],
     data: str,
     include: bool,
     output_dir: Optional[str],
-    server: QuicClient,
     zero_rtt: bool,
 ) -> None:
     # parse URL
@@ -346,46 +349,49 @@ async def run(
     else:
         host = parsed.netloc
         port = 443
-    protocol = await server.create_protocol(
+
+    async with connect(
+        local_host,
+        local_ports,
+        local_preferred_port,
         host,
         port,
+        configuration=configuration,
         create_protocol=HttpClient,
         session_ticket_handler=save_session_ticket,
         wait_connected=not zero_rtt,
-    )
-    protocol = cast(HttpClient, protocol)
+    ) as client:
+        client = cast(HttpClient, client)
 
-    if parsed.scheme == "wss":
-        ws = await protocol.websocket(urls[0], subprotocols=["chat", "superchat"])
+        if parsed.scheme == "wss":
+            ws = await client.websocket(urls[0], subprotocols=["chat", "superchat"])
 
-        # send some messages and receive reply
-        for i in range(2):
-            message = "Hello {}, WebSocket!".format(i)
-            print("> " + message)
-            await ws.send(message)
+            # send some messages and receive reply
+            for i in range(2):
+                message = "Hello {}, WebSocket!".format(i)
+                print("> " + message)
+                await ws.send(message)
 
-            message = await ws.recv()
-            print("< " + message)
+                message = await ws.recv()
+                print("< " + message)
 
-        await ws.close()
-    else:
-        # perform request
-        coros = [
-            perform_http_request(
-                client=protocol,
-                url=url,
-                data=data,
-                include=include,
-                output_dir=output_dir,
-            )
-            for url in urls
-        ]
-        await asyncio.gather(*coros)
+            await ws.close()
+        else:
+            # perform request
+            coros = [
+                perform_http_request(
+                    client=client,
+                    url=url,
+                    data=data,
+                    include=include,
+                    output_dir=output_dir,
+                )
+                for url in urls
+            ]
+            await asyncio.gather(*coros)
 
-        # process http pushes
-        process_http_pushes(client=protocol, include=include, output_dir=output_dir)
-
-    await server.close_protocol()
+            # process http pushes
+            process_http_pushes(client=client, include=include, output_dir=output_dir)
 
 
 if __name__ == "__main__":
@@ -529,29 +535,19 @@ if __name__ == "__main__":
         except FileNotFoundError:
             pass
 
-    servers: Dict[str, QuicClient] = {}
-    transports: Dict[str, asyncio.DatagramTransport] = {}
-
     if uvloop is not None:
         uvloop.install()
     loop = asyncio.get_event_loop()
-    for local_port in local_ports:
-        loop.run_until_complete(
-            serve_client(
-                args.local_host,
-                local_port,
-                configuration=configuration,
-                transports=transports,
-                servers=servers,
-            )
-        )
     loop.run_until_complete(
         run(
+            local_host=args.local_host,
+            local_ports=local_ports,
+            local_preferred_port=args.local_preferred_port,
+            configuration=configuration,
             urls=args.url,
             data=args.data,
             include=args.include,
             output_dir=args.output_dir,
-            server=servers[str(args.local_preferred_port)],
             zero_rtt=args.zero_rtt,
         )
     )

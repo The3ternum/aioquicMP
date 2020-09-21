@@ -11,16 +11,20 @@ import ssl
 import time
 from dataclasses import dataclass, field
 from enum import Flag
-from typing import Optional, cast
+from typing import AsyncGenerator, Callable, Optional, cast
 
 import httpx
 
-from aioquic.asyncio.client import QuicClient, serve_client
+from aioquic.asyncio import QuicConnectionProtocol
+from aioquic.asyncio import connect as client_connect
+from aioquic.asyncio.compat import asynccontextmanager
+from aioquic.asyncio.protocol import QuicStreamHandler
 from aioquic.h0.connection import H0_ALPN
 from aioquic.h3.connection import H3_ALPN, H3Connection
 from aioquic.h3.events import DataReceived, HeadersReceived, PushPromiseReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.logger import QuicLogger
+from aioquic.tls import SessionTicketHandler
 from examples.http3_client import HttpClient
 from examples.quic_logger import QuicDirectoryLogger
 
@@ -127,184 +131,160 @@ SERVERS = [
 ]
 
 
-async def test_version_negotiation(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_version_negotiation(server: Server, configuration: QuicConfiguration):
     # force version negotiation
     configuration.supported_versions.insert(0, 0x1A2A3A4A)
 
-    protocol = await client.create_protocol(server.host, server.port)
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        await protocol.ping()
 
-    await protocol.ping()
-
-    # check log
-    items = configuration.quic_logger.to_dict()["traces"][0]["events"]
-    for (stamp, category, event, data) in items:
-        if (
-            category == "transport"
-            and event == "packet_received"
-            and data["packet_type"] == "version_negotiation"
-        ):
-            server.result |= Result.V
-
-    await client.close_protocol()
+        # check log
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
+            if (
+                category == "transport"
+                and event == "packet_received"
+                and data["packet_type"] == "version_negotiation"
+            ):
+                server.result |= Result.V
 
 
-async def test_handshake_and_close(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
-    protocol = await client.create_protocol(server.host, server.port)
-
-    await protocol.ping()
-    server.result |= Result.H
-
-    await client.close_protocol()
-
+async def test_handshake_and_close(server: Server, configuration: QuicConfiguration):
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        await protocol.ping()
+        server.result |= Result.H
     server.result |= Result.C
 
 
-async def test_retry(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_retry(server: Server, configuration: QuicConfiguration):
     # skip test if there is not retry port
     if server.retry_port is None:
         return
 
-    protocol = await client.create_protocol(server.host, server.port)
+    async with connect(
+        server.host, server.retry_port, configuration=configuration
+    ) as protocol:
+        await protocol.ping()
 
-    await protocol.ping()
-
-    # check log
-    items = configuration.quic_logger.to_dict()["traces"][0]["events"]
-    for (stamp, category, event, data) in items:
-        if (
-            category == "transport"
-            and event == "packet_received"
-            and data["packet_type"] == "retry"
-        ):
-            server.result |= Result.S
-
-    await client.close_protocol()
+        # check log
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
+            if (
+                category == "transport"
+                and event == "packet_received"
+                and data["packet_type"] == "retry"
+            ):
+                server.result |= Result.S
 
 
-async def test_quantum_readiness(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_quantum_readiness(server: Server, configuration: QuicConfiguration):
     configuration.quantum_readiness_test = True
-
-    protocol = await client.create_protocol(server.host, server.port)
-
-    await protocol.ping()
-    server.result |= Result.Q
-
-    await client.close_protocol()
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        await protocol.ping()
+        server.result |= Result.Q
 
 
-async def test_http_0(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_http_0(server: Server, configuration: QuicConfiguration):
     if server.path is None:
         return
 
     configuration.alpn_protocols = H0_ALPN
-
-    prtcl = await client.create_protocol(
+    async with connect(
         server.host,
         server.port,
+        configuration=configuration,
         create_protocol=HttpClient,
-    )
+    ) as prtcl:
+        protocol = cast(HttpClient, prtcl)
 
-    protocol = cast(HttpClient, prtcl)
-
-    # perform HTTP request
-    events = await protocol.get(
-        "https://{}:{}{}".format(server.host, server.port, server.path)
-    )
-    if events and isinstance(events[0], HeadersReceived):
-        server.result |= Result.D
-
-    await client.close_protocol()
+        # perform HTTP request
+        events = await protocol.get(
+            "https://{}:{}{}".format(server.host, server.port, server.path)
+        )
+        if events and isinstance(events[0], HeadersReceived):
+            server.result |= Result.D
 
 
-async def test_http_3(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_http_3(server: Server, configuration: QuicConfiguration):
     port = server.http3_port or server.port
     if server.path is None:
         return
 
     configuration.alpn_protocols = H3_ALPN
-
-    prtcl = await client.create_protocol(
+    async with connect(
         server.host,
         port,
+        configuration=configuration,
         create_protocol=HttpClient,
-    )
+    ) as prtcl:
+        protocol = cast(HttpClient, prtcl)
 
-    protocol = cast(HttpClient, prtcl)
-
-    # perform HTTP request
-    events = await protocol.get(
-        "https://{}:{}{}".format(server.host, server.port, server.path)
-    )
-    if events and isinstance(events[0], HeadersReceived):
-        server.result |= Result.D
-        server.result |= Result.three
-
-    # perform more HTTP requests to use QPACK dynamic tables
-    for i in range(2):
+        # perform HTTP request
         events = await protocol.get(
             "https://{}:{}{}".format(server.host, server.port, server.path)
         )
-    if events and isinstance(events[0], HeadersReceived):
-        http = cast(H3Connection, protocol._http)
-        protocol._quic._logger.info(
-            "QPACK decoder bytes RX %d TX %d",
-            http._decoder_bytes_received,
-            http._decoder_bytes_sent,
-        )
-        protocol._quic._logger.info(
-            "QPACK encoder bytes RX %d TX %d",
-            http._encoder_bytes_received,
-            http._encoder_bytes_sent,
-        )
-        if (
-            http._decoder_bytes_received
-            and http._decoder_bytes_sent
-            and http._encoder_bytes_received
-            and http._encoder_bytes_sent
-        ):
-            server.result |= Result.d
+        if events and isinstance(events[0], HeadersReceived):
+            server.result |= Result.D
+            server.result |= Result.three
 
-    # check push support
-    if server.push_path is not None:
-        protocol.pushes.clear()
-        await protocol.get(
-            "https://{}:{}{}".format(server.host, server.port, server.push_path)
-        )
-        await asyncio.sleep(0.5)
-        for push_id, events in protocol.pushes.items():
+        # perform more HTTP requests to use QPACK dynamic tables
+        for i in range(2):
+            events = await protocol.get(
+                "https://{}:{}{}".format(server.host, server.port, server.path)
+            )
+        if events and isinstance(events[0], HeadersReceived):
+            http = cast(H3Connection, protocol._http)
+            protocol._quic._logger.info(
+                "QPACK decoder bytes RX %d TX %d",
+                http._decoder_bytes_received,
+                http._decoder_bytes_sent,
+            )
+            protocol._quic._logger.info(
+                "QPACK encoder bytes RX %d TX %d",
+                http._encoder_bytes_received,
+                http._encoder_bytes_sent,
+            )
             if (
-                len(events) >= 3
-                and isinstance(events[0], PushPromiseReceived)
-                and isinstance(events[1], HeadersReceived)
-                and isinstance(events[2], DataReceived)
+                http._decoder_bytes_received
+                and http._decoder_bytes_sent
+                and http._encoder_bytes_received
+                and http._encoder_bytes_sent
             ):
-                protocol._quic._logger.info(
-                    "Push promise %d for %s received (status %s)",
-                    push_id,
-                    dict(events[0].headers)[b":path"].decode("ascii"),
-                    int(dict(events[1].headers)[b":status"]),
-                )
+                server.result |= Result.d
 
-                server.result |= Result.p
+        # check push support
+        if server.push_path is not None:
+            protocol.pushes.clear()
+            await protocol.get(
+                "https://{}:{}{}".format(server.host, server.port, server.push_path)
+            )
+            await asyncio.sleep(0.5)
+            for push_id, events in protocol.pushes.items():
+                if (
+                    len(events) >= 3
+                    and isinstance(events[0], PushPromiseReceived)
+                    and isinstance(events[1], HeadersReceived)
+                    and isinstance(events[2], DataReceived)
+                ):
+                    protocol._quic._logger.info(
+                        "Push promise %d for %s received (status %s)",
+                        push_id,
+                        dict(events[0].headers)[b":path"].decode("ascii"),
+                        int(dict(events[1].headers)[b":status"]),
+                    )
 
-    await client.close_protocol()
+                    server.result |= Result.p
 
 
-async def test_session_resumption(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_session_resumption(server: Server, configuration: QuicConfiguration):
     port = server.session_resumption_port or server.port
     saved_ticket = None
 
@@ -313,79 +293,65 @@ async def test_session_resumption(
         saved_ticket = ticket
 
     # connect a first time, receive a ticket
-    protocol = await client.create_protocol(
+    async with connect(
         server.host,
         port,
+        configuration=configuration,
         session_ticket_handler=session_ticket_handler,
-    )
+    ) as protocol:
+        await protocol.ping()
 
-    await protocol.ping()
-
-    # some servers don't send the ticket immediately
-    await asyncio.sleep(1)
-
-    await client.close_protocol()
+        # some servers don't send the ticket immediately
+        await asyncio.sleep(1)
 
     # connect a second time, with the ticket
     if saved_ticket is not None:
         configuration.session_ticket = saved_ticket
+        async with connect(server.host, port, configuration=configuration) as protocol:
+            await protocol.ping()
 
-        protocol = await client.create_protocol(server.host, port)
+            # check session was resumed
+            if protocol._quic.tls.session_resumed:
+                server.result |= Result.R
 
+            # check early data was accepted
+            if protocol._quic.tls.early_data_accepted:
+                server.result |= Result.Z
+
+
+async def test_key_update(server: Server, configuration: QuicConfiguration):
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        # cause some traffic
         await protocol.ping()
 
-        # check session was resumed
-        if protocol._quic.tls.session_resumed:
-            server.result |= Result.R
+        # request key update
+        protocol.request_key_update()
 
-        # check early data was accepted
-        if protocol._quic.tls.early_data_accepted:
-            server.result |= Result.Z
+        # cause more traffic
+        await protocol.ping()
 
-        await client.close_protocol()
+        server.result |= Result.U
 
 
-async def test_key_update(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
-    protocol = await client.create_protocol(server.host, server.port)
+async def test_server_cid_change(server: Server, configuration: QuicConfiguration):
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        # cause some traffic
+        await protocol.ping()
 
-    # cause some traffic
-    await protocol.ping()
+        # change connection ID
+        protocol.change_connection_id(0)
 
-    # request key update
-    protocol.request_key_update()
+        # cause more traffic
+        await protocol.ping()
 
-    # cause more traffic
-    await protocol.ping()
-
-    server.result |= Result.U
-
-    await client.close_protocol()
+        server.result |= Result.M
 
 
-async def test_server_cid_change(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
-    protocol = await client.create_protocol(server.host, server.port)
-
-    # cause some traffic
-    await protocol.ping()
-
-    # change connection ID
-    protocol.change_connection_id(0)
-
-    # cause more traffic
-    await protocol.ping()
-
-    server.result |= Result.M
-
-    await client.close_protocol()
-
-
-async def test_nat_rebinding(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_nat_rebinding(server: Server, configuration: QuicConfiguration):
     """
     async with connect(
         server.host, server.port, configuration=configuration
@@ -403,8 +369,9 @@ async def test_nat_rebinding(
 
         # check log
         path_challenges = 0
-        items = configuration.quic_logger.to_dict()["traces"][0]["events"]
-        for (stamp, category, event, data) in items:
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
             if (
                 category == "transport"
                 and event == "packet_received"
@@ -422,9 +389,7 @@ async def test_nat_rebinding(
     return
 
 
-async def test_address_mobility(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_address_mobility(server: Server, configuration: QuicConfiguration):
     """
     async with connect(
         server.host, server.port, configuration=configuration
@@ -445,8 +410,9 @@ async def test_address_mobility(
 
         # check log
         path_challenges = 0
-        items = configuration.quic_logger.to_dict()["traces"][0]["events"]
-        for (stamp, category, event, data) in items:
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
             if (
                 category == "transport"
                 and event == "packet_received"
@@ -465,29 +431,25 @@ async def test_address_mobility(
     return
 
 
-async def test_spin_bit(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
-    protocol = await client.create_protocol(server.host, server.port)
+async def test_spin_bit(server: Server, configuration: QuicConfiguration):
+    async with connect(
+        server.host, server.port, configuration=configuration
+    ) as protocol:
+        for i in range(5):
+            await protocol.ping()
 
-    for i in range(5):
-        await protocol.ping()
-
-    # check log
-    spin_bits = set()
-    items = configuration.quic_logger.to_dict()["traces"][0]["events"]
-    for (stamp, category, event, data) in items:
-        if category == "connectivity" and event == "spin_bit_updated":
-            spin_bits.add(data["state"])
-    if len(spin_bits) == 2:
-        server.result |= Result.P
-
-    await client.close_protocol()
+        # check log
+        spin_bits = set()
+        for stamp, category, event, data in configuration.quic_logger.to_dict()[
+            "traces"
+        ][0]["events"]:
+            if category == "connectivity" and event == "spin_bit_updated":
+                spin_bits.add(data["state"])
+        if len(spin_bits) == 2:
+            server.result |= Result.P
 
 
-async def test_throughput(
-    server: Server, client: QuicClient, configuration: QuicConfiguration
-):
+async def test_throughput(server: Server, configuration: QuicConfiguration):
     failures = 0
     if server.throughput_path is None:
         return
@@ -511,26 +473,22 @@ async def test_throughput(
             configuration.alpn_protocols = H0_ALPN
             port = server.port
         start = time.time()
-
-        prtcl = await client.create_protocol(
+        async with connect(
             server.host,
             port,
+            configuration=configuration,
             create_protocol=HttpClient,
-        )
+        ) as prtcl:
+            protocol = cast(HttpClient, prtcl)
 
-        protocol = cast(HttpClient, prtcl)
-
-        http_events = await protocol.get(
-            "https://{}:{}{}".format(server.host, server.port, path)
-        )
-        quic_elapsed = time.time() - start
-        quic_octets = 0
-        for http_event in http_events:
-            if isinstance(http_event, DataReceived):
-                quic_octets += len(http_event.data)
-
-        await client.close_protocol()
-
+            http_events = await protocol.get(
+                "https://{}:{}{}".format(server.host, server.port, path)
+            )
+            quic_elapsed = time.time() - start
+            quic_octets = 0
+            for http_event in http_events:
+                if isinstance(http_event, DataReceived):
+                    quic_octets += len(http_event.data)
         assert quic_octets == size, "HTTP/QUIC response size mismatch"
 
         print(" - HTTP/TCP  completed in %.3f s" % tcp_elapsed)
@@ -570,17 +528,9 @@ async def run(servers, tests, quic_log=False, secrets_log_file=None) -> None:
             else:
                 timeout = 10
             try:
-                client = await serve_client(
-                    "::",
-                    0,
-                    configuration=configuration,
-                    transports={},
-                    servers={},
-                )
                 await asyncio.wait_for(
-                    test_func(server, client, configuration), timeout=timeout
+                    test_func(server, configuration), timeout=timeout
                 )
-                client.close()
             except Exception as exc:
                 print(exc)
 
@@ -592,6 +542,32 @@ async def run(servers, tests, quic_log=False, secrets_log_file=None) -> None:
         print("SUMMARY")
         for server in servers:
             print_result(server)
+
+
+@asynccontextmanager
+async def connect(
+    host: str,
+    port: int,
+    *,
+    configuration: Optional[QuicConfiguration] = None,
+    create_protocol: Optional[Callable] = QuicConnectionProtocol,
+    session_ticket_handler: Optional[SessionTicketHandler] = None,
+    stream_handler: Optional[QuicStreamHandler] = None,
+    wait_connected: bool = True,
+) -> AsyncGenerator[QuicConnectionProtocol, None]:
+    async with client_connect(
+        "::",
+        [0],
+        0,
+        host,
+        port,
+        configuration=configuration,
+        create_protocol=create_protocol,
+        session_ticket_handler=session_ticket_handler,
+        stream_handler=stream_handler,
+        wait_connected=wait_connected,
+    ) as protocol:
+        yield protocol
 
 
 if __name__ == "__main__":

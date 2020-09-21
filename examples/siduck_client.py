@@ -2,9 +2,9 @@ import argparse
 import asyncio
 import logging
 import ssl
-from typing import Dict, Optional, cast
+from typing import List, Optional, cast
 
-from aioquic.asyncio.client import QuicClient, serve_client
+from aioquic.asyncio.client import connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import DatagramFrameReceived, QuicEvent
@@ -36,19 +36,28 @@ class SiduckClient(QuicConnectionProtocol):
                 waiter.set_result(None)
 
 
-async def run(host: str, port: int, server: QuicClient) -> None:
-    protocol = await server.create_protocol(
+async def run(
+    local_host: str,
+    local_ports: List[int],
+    local_preferred_port: int,
+    configuration: QuicConfiguration,
+    host: str,
+    port: int,
+) -> None:
+    async with connect(
+        local_host,
+        local_ports,
+        local_preferred_port,
         host,
         port,
+        configuration=configuration,
         create_protocol=SiduckClient,
-    )
-    protocol = cast(SiduckClient, protocol)
+    ) as client:
+        client = cast(SiduckClient, client)
 
-    logger.info("sending quack")
-    await protocol.quack()
-    logger.info("received quack-ack")
-
-    await server.close_protocol()
+        logger.info("sending quack")
+        await client.quack()
+        logger.info("received quack-ack")
 
 
 if __name__ == "__main__":
@@ -131,24 +140,14 @@ if __name__ == "__main__":
     if args.secrets_log:
         configuration.secrets_log_file = open(args.secrets_log, "a")
 
-    servers: Dict[str, QuicClient] = {}
-    transports: Dict[str, asyncio.DatagramTransport] = {}
-
     loop = asyncio.get_event_loop()
-    for local_port in local_ports:
-        loop.run_until_complete(
-            serve_client(
-                args.local_host,
-                local_port,
-                configuration=configuration,
-                transports=transports,
-                servers=servers,
-            )
-        )
     loop.run_until_complete(
         run(
+            local_host=args.local_host,
+            local_ports=local_ports,
+            local_preferred_port=args.local_preferred_port,
+            configuration=configuration,
             host=args.host,
             port=args.port,
-            server=servers[str(args.local_preferred_port)],
         )
     )
