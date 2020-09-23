@@ -10,6 +10,8 @@ from aioquic.buffer import UINT_VAR_MAX, Buffer, encode_uint_var
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import (
+    IFType,
+    IPVersion,
     QuicConnection,
     QuicConnectionError,
     QuicNetworkPath,
@@ -75,7 +77,12 @@ def consume_events(connection):
 def create_standalone_client(self, **client_options):
     client = QuicConnection(
         configuration=QuicConfiguration(
-            is_client=True, quic_logger=QuicLogger(), **client_options
+            is_client=True,
+            quic_logger=QuicLogger(),
+            local_addresses=[
+                [CLIENT_ADDR[0], IPVersion.IPV4, IFType.FIXED, CLIENT_ADDR[1]]
+            ],
+            **client_options,
         )
     )
     client._ack_delay = 0
@@ -100,7 +107,12 @@ def client_and_server(
     server_patch=lambda x: None,
 ):
     client_configuration = QuicConfiguration(
-        is_client=True, quic_logger=QuicLogger(), **client_options
+        is_client=True,
+        quic_logger=QuicLogger(),
+        local_addresses=[
+            [CLIENT_ADDR[0], IPVersion.IPV4, IFType.FIXED, CLIENT_ADDR[1]]
+        ],
+        **client_options,
     )
     client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
 
@@ -110,14 +122,19 @@ def client_and_server(
     client_patch(client)
 
     server_configuration = QuicConfiguration(
-        is_client=False, quic_logger=QuicLogger(), **server_options
+        is_client=False,
+        quic_logger=QuicLogger(),
+        local_addresses=[
+            [SERVER_ADDR[0], IPVersion.IPV4, IFType.FIXED, SERVER_ADDR[1]]
+        ],
+        **server_options,
     )
     server_configuration.load_cert_chain(server_certfile, server_keyfile)
 
     server = QuicConnection(
         configuration=server_configuration,
         original_destination_connection_id=client.original_destination_connection_id,
-        **server_kwargs
+        **server_kwargs,
     )
     server._ack_delay = 0
     disable_packet_pacing(server)
@@ -352,13 +369,23 @@ class QuicConnectionTest(TestCase):
         def datagram_sizes(items):
             return [len(x[0]) for x in items]
 
-        client_configuration = QuicConfiguration(is_client=True)
+        client_configuration = QuicConfiguration(
+            is_client=True,
+            local_addresses=[
+                [CLIENT_ADDR[0], IPVersion.IPV4, IFType.FIXED, CLIENT_ADDR[1]]
+            ],
+        )
         client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
 
         client = QuicConnection(configuration=client_configuration)
         client._ack_delay = 0
 
-        server_configuration = QuicConfiguration(is_client=False)
+        server_configuration = QuicConfiguration(
+            is_client=False,
+            local_addresses=[
+                [SERVER_ADDR[0], IPVersion.IPV4, IFType.FIXED, SERVER_ADDR[1]]
+            ],
+        )
         server_configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
 
         server = QuicConnection(
@@ -398,7 +425,7 @@ class QuicConnectionTest(TestCase):
         client.receive_datagram(items[0][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         client.receive_datagram(items[1][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [376])
+        self.assertEqual(datagram_sizes(items), [388])  # +12 on 376 for add_address
         self.assertAlmostEqual(client.get_timer(), 0.625)
         self.assertEqual(type(client.next_event()), events.ProtocolNegotiated)
         self.assertEqual(type(client.next_event()), events.HandshakeCompleted)
@@ -407,7 +434,7 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [229])
+        self.assertEqual(datagram_sizes(items), [241])  # +12 on 229 for add_address
         self.assertAlmostEqual(server.get_timer(), 0.625)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 0)
@@ -424,13 +451,23 @@ class QuicConnectionTest(TestCase):
         def datagram_sizes(items):
             return [len(x[0]) for x in items]
 
-        client_configuration = QuicConfiguration(is_client=True)
+        client_configuration = QuicConfiguration(
+            is_client=True,
+            local_addresses=[
+                [CLIENT_ADDR[0], IPVersion.IPV4, IFType.FIXED, CLIENT_ADDR[1]]
+            ],
+        )
         client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
 
         client = QuicConnection(configuration=client_configuration)
         client._ack_delay = 0
 
-        server_configuration = QuicConfiguration(is_client=False)
+        server_configuration = QuicConfiguration(
+            is_client=False,
+            local_addresses=[
+                [SERVER_ADDR[0], IPVersion.IPV4, IFType.FIXED, SERVER_ADDR[1]]
+            ],
+        )
         server_configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
 
         server = QuicConnection(
@@ -499,7 +536,7 @@ class QuicConnectionTest(TestCase):
         client.receive_datagram(items[0][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         client.receive_datagram(items[1][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [329])
+        self.assertEqual(datagram_sizes(items), [341])  # +12 on 341 for add_address
         self.assertAlmostEqual(client.get_timer(), 0.95)
         self.assertEqual(type(client.next_event()), events.HandshakeCompleted)
         self.assertEqual(type(client.next_event()), events.ConnectionIdIssued)
@@ -507,7 +544,7 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [229])
+        self.assertEqual(datagram_sizes(items), [241])  # +12 on 229 for add_address
         self.assertAlmostEqual(server.get_timer(), 0.675)
         self.assertEqual(type(server.next_event()), events.HandshakeCompleted)
         self.assertEqual(type(server.next_event()), events.ConnectionIdIssued)
@@ -522,13 +559,23 @@ class QuicConnectionTest(TestCase):
         def datagram_sizes(items):
             return [len(x[0]) for x in items]
 
-        client_configuration = QuicConfiguration(is_client=True)
+        client_configuration = QuicConfiguration(
+            is_client=True,
+            local_addresses=[
+                [CLIENT_ADDR[0], IPVersion.IPV4, IFType.FIXED, CLIENT_ADDR[1]]
+            ],
+        )
         client_configuration.load_verify_locations(cafile=SERVER_CACERTFILE)
 
         client = QuicConnection(configuration=client_configuration)
         client._ack_delay = 0
 
-        server_configuration = QuicConfiguration(is_client=False)
+        server_configuration = QuicConfiguration(
+            is_client=False,
+            local_addresses=[
+                [SERVER_ADDR[0], IPVersion.IPV4, IFType.FIXED, SERVER_ADDR[1]]
+            ],
+        )
         server_configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
 
         server = QuicConnection(
@@ -559,7 +606,7 @@ class QuicConnectionTest(TestCase):
         client.receive_datagram(items[0][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         client.receive_datagram(items[1][0], SERVER_ADDR, CLIENT_ADDR, now=now)
         items = client.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [376])
+        self.assertEqual(datagram_sizes(items), [388])  # +12 on 376 for add_address
         self.assertAlmostEqual(client.get_timer(), 0.425)
         self.assertEqual(type(client.next_event()), events.ProtocolNegotiated)
         self.assertEqual(type(client.next_event()), events.HandshakeCompleted)
@@ -569,7 +616,7 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [229])
+        self.assertEqual(datagram_sizes(items), [241])  # +12 on 229 for add_address
         self.assertAlmostEqual(server.get_timer(), 0.425)
         self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
         self.assertEqual(len(server._loss.spaces[1].sent_packets), 0)
@@ -598,7 +645,7 @@ class QuicConnectionTest(TestCase):
         self.assertTrue(server._handshake_done_pending)
         items = server.datagrams_to_send(now=now)
         self.assertFalse(server._handshake_done_pending)
-        self.assertEqual(datagram_sizes(items), [224])
+        self.assertEqual(datagram_sizes(items), [236])  # +12 on 224 for add_address
 
     def test_connect_with_quantum_readiness(self):
         with client_and_server(client_options={"quantum_readiness_test": True},) as (
@@ -1260,7 +1307,7 @@ class QuicConnectionTest(TestCase):
             buf = Buffer(capacity=100)
             buf.push_uint_var(7)  # sequence_number
             buf.push_uint_var(0)  # retire_prior_to
-            buf.push_uint_var(8)
+            buf.push_uint8(8)
             buf.push_bytes(bytes(8))
             buf.push_bytes(bytes(16))
             buf.seek(0)
@@ -1283,7 +1330,7 @@ class QuicConnectionTest(TestCase):
             buf = Buffer(capacity=100)
             buf.push_uint_var(8)  # sequence_number
             buf.push_uint_var(0)  # retire_prior_to
-            buf.push_uint_var(8)
+            buf.push_uint8(8)
             buf.push_bytes(bytes(8))
             buf.push_bytes(bytes(16))
             buf.seek(0)
@@ -1308,7 +1355,7 @@ class QuicConnectionTest(TestCase):
             buf = Buffer(capacity=100)
             buf.push_uint_var(8)  # sequence_number
             buf.push_uint_var(2)  # retire_prior_to
-            buf.push_uint_var(8)
+            buf.push_uint8(8)
             buf.push_bytes(bytes(8))
             buf.push_bytes(bytes(16))
             buf.seek(0)
@@ -1331,7 +1378,7 @@ class QuicConnectionTest(TestCase):
             buf = Buffer(capacity=100)
             buf.push_uint_var(8)  # sequence_number
             buf.push_uint_var(9)  # retire_prior_to
-            buf.push_uint_var(8)
+            buf.push_uint8(8)
             buf.push_bytes(bytes(8))
             buf.push_bytes(bytes(16))
             buf.seek(0)
@@ -1966,7 +2013,7 @@ class QuicConnectionTest(TestCase):
         with client_and_server() as (client, server):
             # check congestion control
             self.assertEqual(client._loss.bytes_in_flight, 0)
-            self.assertEqual(client._loss.congestion_window, 14303)
+            self.assertEqual(client._loss.congestion_window, 14315)  # +12 on 14303 for add_address
 
             # artificially raise received data counter
             client._local_max_data_used = client._local_max_data

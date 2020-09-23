@@ -50,7 +50,7 @@ class QuicConfiguration:
     Per-stream flow control limit.
     """
 
-    max_sending_uniflow_id: int = 0
+    max_sending_uniflow_id: Optional[int] = 0
     """
     Connection-wide number of sending uniflows
     """
