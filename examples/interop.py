@@ -352,17 +352,28 @@ async def test_server_cid_change(server: Server, configuration: QuicConfiguratio
 
 
 async def test_nat_rebinding(server: Server, configuration: QuicConfiguration):
-    """
-    async with connect(
-        server.host, server.port, configuration=configuration
+    # use the MP-based connect method for binding multiple addresses
+    # this currently simulates nat rebinding with a single instruction
+    # fixme: rewrite the code to simulate a real nat rebind, with closing transports?
+    async with client_connect(
+        "::",
+        [0, 0],
+        0,
+        server.host,
+        server.port,
+        configuration=configuration,
     ) as protocol:
         # cause some traffic
         await protocol.ping()
 
+        # change the local address of the initial sending uniflow
+        siunuflow = protocol._quic._sending_uniflows[0]
+        siunuflow.source_address = protocol._quic._local_addresses[1]
+
         # replace transport
-        for transport in protocol._transports.values():
-            transport.close()
-        await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
+        # for transport in protocol._transports.values():
+        #     transport.close()
+        # await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 
         # cause more traffic
         await protocol.ping()
@@ -384,23 +395,31 @@ async def test_nat_rebinding(server: Server, configuration: QuicConfiguration):
             protocol._quic._logger.warning("No PATH_CHALLENGE received")
         else:
             server.result |= Result.B
-    """
-    print("This feature is still a work in progress")
-    return
 
 
 async def test_address_mobility(server: Server, configuration: QuicConfiguration):
-    """
-    async with connect(
-        server.host, server.port, configuration=configuration
+    # use the MP-based connect method for binding multiple addresses
+    # this currently simulates address mobility with a single instruction
+    # fixme: rewrite the code to simulate real address mobility, with closing transports?
+    async with client_connect(
+        "::",
+        [0, 0],
+        0,
+        server.host,
+        server.port,
+        configuration=configuration,
     ) as protocol:
         # cause some traffic
         await protocol.ping()
 
+        # change the local address of the initial sending uniflow
+        siunuflow = protocol._quic._sending_uniflows[0]
+        siunuflow.source_address = protocol._quic._local_addresses[1]
+
         # replace transport
-        for transport in protocol._transports.values():
-            transport.close()
-        await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
+        # for transport in protocol._transports.values():
+        #     transport.close()
+        # await loop.create_datagram_endpoint(lambda: protocol, local_addr=("::", 0))
 
         # change connection ID
         protocol.change_connection_id(0)
@@ -426,9 +445,6 @@ async def test_address_mobility(server: Server, configuration: QuicConfiguration
             protocol._quic._logger.warning("No PATH_CHALLENGE received")
         else:
             server.result |= Result.A
-    """
-    print("This feature is still a work in progress")
-    return
 
 
 async def test_spin_bit(server: Server, configuration: QuicConfiguration):
@@ -591,6 +607,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="increase logging verbosity"
     )
+    parser.add_argument(
+        "-i",
+        "--include-local",
+        action="store_true",
+        help="test the local server implementation",
+    )
 
     args = parser.parse_args()
 
@@ -607,6 +629,17 @@ if __name__ == "__main__":
 
     # determine what to run
     servers = SERVERS
+    if args.include_local:
+        servers.append(
+            Server(
+                "aioquicMP",
+                "localhost",
+                port=4433,
+                push_path="/",
+                structured_logging=True,
+                verify_mode=ssl.CERT_NONE,
+            )
+        )
     tests = list(filter(lambda x: x[0].startswith("test_"), globals().items()))
     if args.server:
         servers = list(filter(lambda x: x.name == args.server, servers))

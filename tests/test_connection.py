@@ -10,11 +10,11 @@ from aioquic.buffer import UINT_VAR_MAX, Buffer, encode_uint_var
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import (
+    EndpointAddress,
     IFType,
     IPVersion,
     QuicConnection,
     QuicConnectionError,
-    QuicNetworkPath,
     QuicReceiveContext,
 )
 from aioquic.quic.crypto import CryptoPair
@@ -61,7 +61,10 @@ def client_receive_context(client, epoch=tls.Epoch.ONE_RTT):
     return QuicReceiveContext(
         epoch=epoch,
         host_cid=client._receiving_uniflows[0].cid,
-        perceived_address=client._perceived_remote_addresses[0],
+        receiving_uniflow=client._receiving_uniflows[0],
+        perceived_address=client._receiving_uniflows[0].source_address,
+        # perceived_address=client._perceived_remote_addresses[0],
+        # Todo: change this to uniflow0 address
         quic_logger_frames=[],
         time=asyncio.get_event_loop().time(),
     )
@@ -748,6 +751,29 @@ class QuicConnectionTest(TestCase):
             self.assertEqual(transfer(server, client), 1)
             self.assertEqual(
                 sequence_numbers(client._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7, 8],
+            )
+
+    # fixme: are servers allowed to change their connection_id at will?
+    def test_server_change_connection_id(self):
+        with client_and_server() as (client, server):
+            self.assertEqual(
+                sequence_numbers(server._sending_uniflows[0].cid_available),
+                [1, 2, 3, 4, 5, 6, 7],
+            )
+
+            # the client changes connection ID
+            server.change_connection_id(0)
+            self.assertEqual(transfer(server, client), 1)
+            self.assertEqual(
+                sequence_numbers(server._sending_uniflows[0].cid_available),
+                [2, 3, 4, 5, 6, 7],
+            )
+
+            # the server provides a new connection ID
+            self.assertEqual(transfer(client, server), 1)
+            self.assertEqual(
+                sequence_numbers(server._sending_uniflows[0].cid_available),
                 [2, 3, 4, 5, 6, 7, 8],
             )
 
@@ -1443,7 +1469,6 @@ class QuicConnectionTest(TestCase):
                 ),
                 ("1.2.3.4", 2345),
             )
-            self.assertFalse(uniflow.perceived_remote_addresses[0].is_validated)
             self.assertEqual(
                 (
                     uniflow.perceived_remote_addresses[1].ip_address,
@@ -1451,7 +1476,7 @@ class QuicConnectionTest(TestCase):
                 ),
                 ("1.2.3.4", 1234),
             )
-            self.assertTrue(uniflow.perceived_remote_addresses[1].is_validated)
+            self.assertFalse(server._sending_uniflows[0].path_is_validated)
 
             # server sends PATH_CHALLENGE and receives PATH_RESPONSE
             for data, addr, local_addr in server.datagrams_to_send(now=time.time()):
@@ -1469,7 +1494,6 @@ class QuicConnectionTest(TestCase):
                 ),
                 ("1.2.3.4", 2345),
             )
-            self.assertTrue(uniflow.perceived_remote_addresses[0].is_validated)
             self.assertEqual(
                 (
                     uniflow.perceived_remote_addresses[1].ip_address,
@@ -1477,7 +1501,7 @@ class QuicConnectionTest(TestCase):
                 ),
                 ("1.2.3.4", 1234),
             )
-            self.assertTrue(uniflow.perceived_remote_addresses[1].is_validated)
+            self.assertTrue(server._sending_uniflows[0].path_is_validated)
 
     def test_handle_path_response_frame_bad(self):
         with client_and_server() as (client, server):
@@ -2013,7 +2037,9 @@ class QuicConnectionTest(TestCase):
         with client_and_server() as (client, server):
             # check congestion control
             self.assertEqual(client._loss.bytes_in_flight, 0)
-            self.assertEqual(client._loss.congestion_window, 14315)  # +12 on 14303 for add_address
+            self.assertEqual(
+                client._loss.congestion_window, 14315
+            )  # +12 on 14303 for add_address
 
             # artificially raise received data counter
             client._local_max_data_used = client._local_max_data
@@ -2390,8 +2416,15 @@ class QuicConnectionTest(TestCase):
 
 class QuicNetworkPathTest(TestCase):
     def test_can_send(self):
-        path = QuicNetworkPath(("1.2.3.4", 1234))
-        self.assertFalse(path.is_validated)
+        path = EndpointAddress(
+            address_id=None,
+            ip_version=IPVersion.IPV4,
+            interface_type=IFType.FIXED,
+            ip_address="1.2.3.4",
+            port=1234,
+            sequence_number=0,
+        )
+        # self.assertFalse(path.is_validated)
 
         # initially, cannot send any data
         self.assertTrue(path.can_send(0))

@@ -147,7 +147,7 @@ async def connect(
         server.set_protocol(protocol)
 
     # connect
-    if len(local_ports) == 1 and local_ports[0] == 0 and local_preferred_port == 0:
+    if local_preferred_port == 0:
         local_addr = list(servers.values())[0].identity
     else:
         local_addr = servers[str(local_preferred_port)].identity

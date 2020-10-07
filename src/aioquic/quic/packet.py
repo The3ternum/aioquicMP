@@ -500,23 +500,3 @@ def push_ack_frame(buf: Buffer, rangeset: RangeSet, delay: int) -> int:
         buf.push_uint_var(r.stop - r.start - 1)
         start = r.start
     return ranges
-
-
-def pull_uniflow_frame(buf: Buffer) -> Tuple[list, list]:
-    rcvUni = buf.pull_uint_var()
-    sndUni = buf.pull_uint_var()
-    receiving_uniflows = []
-    active_sending_uniflows = []
-    for _ in range(rcvUni):
-        uniflow_id = buf.pull_uint_var()
-        local_adress_id = buf.pull_uint8()
-        receiving_uniflows.append(
-            {"uniflow_id": uniflow_id, "local_adress_id": local_adress_id}
-        )
-    for _ in range(sndUni):
-        uniflow_id = buf.pull_uint_var()
-        local_adress_id = buf.pull_uint8()
-        active_sending_uniflows.append(
-            {"uniflow_id": uniflow_id, "local_adress_id": local_adress_id}
-        )
-    return receiving_uniflows, active_sending_uniflows

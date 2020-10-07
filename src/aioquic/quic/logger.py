@@ -260,11 +260,17 @@ class QuicLoggerTrace:
             "frame_type": "uniflows",
             "sequence_number": str(sequence_number),
             "receiving_uniflows": [
-                {str(u["uniflow_id"]), str(u["local_address_id"])}
+                {
+                    "uniflow_id": str(u["uniflow_id"]),
+                    "local_address_id": str(u["local_address_id"]),
+                }
                 for u in receiving_uniflows
             ],
-            "active_sening_uniflows": [
-                {str(u["uniflow_id"]), str(u["local_address_id"])}
+            "active_sending_uniflows": [
+                {
+                    "uniflow_id": str(u["uniflow_id"]),
+                    "local_address_id": str(u["local_address_id"]),
+                }
                 for u in active_sending_uniflows
             ],
         }

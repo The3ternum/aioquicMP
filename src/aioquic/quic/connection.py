@@ -1,6 +1,7 @@
 import binascii
 import logging
 import os
+import random
 import socket
 from collections import deque
 from dataclasses import dataclass
@@ -34,7 +35,6 @@ from .packet import (
     pull_ack_frame,
     pull_quic_header,
     pull_quic_transport_parameters,
-    pull_uniflow_frame,
     push_ack_frame,
     push_quic_transport_parameters,
 )
@@ -170,19 +170,6 @@ class QuicConnectionState(Enum):
     TERMINATED = 4
 
 
-@dataclass
-class QuicNetworkPath:
-    addr: NetworkAddress
-    bytes_received: int = 0
-    bytes_sent: int = 0
-    is_validated: bool = False
-    local_challenge: Optional[bytes] = None
-    remote_challenge: Optional[bytes] = None
-
-    def can_send(self, size: int) -> bool:
-        return self.is_validated or (self.bytes_sent + size) <= 3 * self.bytes_received
-
-
 class IPVersion(IntEnum):
     NONE = 0
     IPV4 = 4
@@ -196,7 +183,7 @@ class IFType(IntEnum):
     OTHER = 3
 
 
-class MPNetworkAddress:
+class EndpointAddress:
     def __init__(
         self,
         *,
@@ -205,7 +192,6 @@ class MPNetworkAddress:
         interface_type: IFType,
         ip_address: str,
         port: Optional[int],
-        is_validated: bool,
         sequence_number: int,
     ) -> None:
         self.address_id: Optional[int] = address_id
@@ -215,27 +201,20 @@ class MPNetworkAddress:
         self.port: Optional[int] = port
 
         self.was_sent: bool = False
-        self.is_validated: bool = is_validated
 
-        self.sequence_number = sequence_number
-        self.is_removed = False
+        self.sequence_number: int = sequence_number
+        self.is_enabled: bool = True
 
+        # only used by initial uniflows
         self.bytes_received: int = 0
         self.bytes_sent: int = 0
-        self.local_challenge: Optional[bytes] = None
-        self.remote_challenge: Optional[bytes] = None
 
     def can_send(self, size: int) -> bool:
-        return self.is_validated or (self.bytes_sent + size) <= 3 * self.bytes_received
+        return (self.bytes_sent + size) <= 3 * self.bytes_received
 
 
-@dataclass
-class QuicReceiveContext:
-    epoch: tls.Epoch
-    host_cid: bytes
-    perceived_address: MPNetworkAddress
-    quic_logger_frames: Optional[List[Any]]
-    time: float
+def dump_address(addr: EndpointAddress) -> Tuple[str, Optional[int]]:
+    return addr.ip_address, addr.port
 
 
 END_STATES = frozenset(
@@ -257,9 +236,6 @@ class QuicReceivingUniflow:
         self,
         *,
         uniflow_id: int,
-        source_address: NetworkAddress,
-        destination_address: NetworkAddress,
-        local_address_id: Optional[int],
         is_first: bool,
         configuration: QuicConfiguration,
     ) -> None:
@@ -276,10 +252,12 @@ class QuicReceivingUniflow:
         self.cid_seq: int = 1
         self.packet_number: int = 0
 
-        self.source_address: NetworkAddress = source_address
-        self.destination_address: NetworkAddress = destination_address
-        self.local_address_id: Optional[int] = local_address_id
-        self.perceived_remote_addresses: List[MPNetworkAddress] = []
+        self.source_address: Optional[EndpointAddress] = None
+        self.destination_address: Optional[EndpointAddress] = None
+
+        self.remote_challenge: Optional[bytes] = None
+
+        self.perceived_remote_addresses: List[EndpointAddress] = []
 
 
 class QuicSendingUniflow:
@@ -287,10 +265,6 @@ class QuicSendingUniflow:
         self,
         *,
         uniflow_id: int,
-        source_address: NetworkAddress,
-        destination_address: NetworkAddress,
-        local_address_id: Optional[int],
-        remote_address_id: Optional[int],
         is_first: bool,
         configuration: QuicConfiguration,
     ) -> None:
@@ -305,15 +279,38 @@ class QuicSendingUniflow:
         self.cid_available: List[QuicConnectionId] = []
         self.token: bytes = b""
         self.retire_connection_ids: List[int] = []
-        self.state: UniflowState = UniflowState.UNUSED
         self.packet_number: int = 0
 
-        self.source_address: NetworkAddress = source_address
-        self.destination_address: NetworkAddress = destination_address
-        self.local_address_id: Optional[int] = local_address_id
-        self.remote_address_id: Optional[int] = remote_address_id
+        self.state: UniflowState = UniflowState.UNUSED
+
+        self.source_address: Optional[EndpointAddress] = None
+        self.destination_address: Optional[EndpointAddress] = None
+
+        self.path_is_validated: bool = False
+        self.local_challenge: Optional[bytes] = None
+        self.path_challenge_at: Optional[float] = None
+
         # Congestion controller
         # Performance metrics
+
+    def reset(self) -> None:
+        self.state = UniflowState.UNUSED
+        self.source_address = None
+        self.destination_address = None
+        self.path_is_validated = False
+        self.local_challenge = None
+        self.path_challenge_at = None
+        # reset congestion controller and performance metrics
+
+
+@dataclass
+class QuicReceiveContext:
+    epoch: tls.Epoch
+    host_cid: bytes
+    receiving_uniflow: QuicReceivingUniflow
+    perceived_address: EndpointAddress
+    quic_logger_frames: Optional[List[Any]]
+    time: float
 
 
 class QuicConnection:
@@ -375,9 +372,6 @@ class QuicConnection:
         self._receiving_uniflows: Dict[int, QuicReceivingUniflow] = {
             0: QuicReceivingUniflow(
                 uniflow_id=0,
-                source_address=None,
-                destination_address=None,
-                local_address_id=None,
                 is_first=True,
                 configuration=configuration,
             )
@@ -389,10 +383,6 @@ class QuicConnection:
         self._sending_uniflows: Dict[int, QuicSendingUniflow] = {
             0: QuicSendingUniflow(
                 uniflow_id=0,
-                source_address=None,
-                destination_address=None,
-                local_address_id=None,
-                remote_address_id=None,
                 is_first=True,
                 configuration=configuration,
             )
@@ -454,25 +444,24 @@ class QuicConnection:
         self._peer_mp_support = False
         self._peer_max_sending_uniflows_id = 0
 
-        self._local_addresses: Dict[int, MPNetworkAddress] = {}
+        self._local_addresses: Dict[int, EndpointAddress] = {}
         # Copy the addresses shared in the configuration
         for i in range(len(configuration.local_addresses)):
             laddr = configuration.local_addresses[i]
-            addr = MPNetworkAddress(
+            addr = EndpointAddress(
                 address_id=i,
                 ip_version=laddr[1],
                 interface_type=laddr[2],
                 ip_address=laddr[0],
-                is_validated=True,
                 port=(laddr[3] if len(laddr) >= 4 else None),
                 sequence_number=0,
             )
             self._local_addresses[i] = addr
 
-        self._remote_addresses: Dict[int, MPNetworkAddress] = {}
-        self._perceived_remote_addresses: List[MPNetworkAddress] = []
+        self._remote_addresses: Dict[int, EndpointAddress] = {}
+        self._perceived_remote_addresses: List[EndpointAddress] = []
 
-        self._uniflows_seq = 0
+        self._uniflows_seq = -1
         self._remote_uniflows_seq = -1
 
         # logging
@@ -577,7 +566,11 @@ class QuicConnection:
             self._consume_peer_cid(uniflow_id)
 
     def add_address(
-        self, ip_address: str, port: int, ip_version: IPVersion, interface_type: IFType
+        self,
+        ip_address: str,
+        port: Optional[int],
+        ip_version: IPVersion,
+        interface_type: IFType,
     ) -> None:
         """
         Add a new address for the connection to communicate over.
@@ -585,20 +578,21 @@ class QuicConnection:
         After calling this method call :meth:`datagrams_to_send` to retrieve data
         which needs to be sent.
         """
-        # Todo: add check for already existing addresses?
         address_id = -1
         for addr in self._local_addresses.values():
+            # check for already existing addresses
+            if addr.ip_address == ip_address and addr.port == port:
+                return
             if addr.address_id > address_id:
                 address_id = addr.address_id
         address_id += 1
-        self._local_addresses[address_id] = MPNetworkAddress(
+        self._local_addresses[address_id] = EndpointAddress(
             address_id=len(self._local_addresses),
             ip_version=ip_version,
             interface_type=interface_type,
             ip_address=ip_address,
             port=port,
             sequence_number=0,
-            is_validated=True,
         )
 
     def remove_address(self, address_id: int):
@@ -606,13 +600,21 @@ class QuicConnection:
         Remove an address from the connection.
 
         After calling this method call :meth:`datagrams_to_send` to retrieve data
-            which needs to be sent.
+        which needs to be sent.
         """
         if address_id in self._local_addresses.keys():
-            self._local_addresses[address_id].is_removed = True
+            self._local_addresses[address_id].is_enabled = False
             self._local_addresses[address_id].sequence_number += 1
             self._removed_addresses.append(address_id)
-            # TODO: clear uniflows that use this address
+
+            # reset uniflows that use this address
+            for suniflow in self._sending_uniflows.values():
+                if suniflow.source_address.address_id == address_id:
+                    suniflow.reset()
+
+            # write uniflows frame to communicate state
+            self._uniflows_seq += 1
+            self._uniflows_pending = True
 
     def close(
         self,
@@ -657,52 +659,40 @@ class QuicConnection:
         ), "connect() can only be called for clients and a single time"
         self._connect_called = True
 
-        perceived_remote_address = MPNetworkAddress(
-            address_id=None,
+        perceived_remote_address = EndpointAddress(
+            address_id=0,
             ip_address=addr[0],
             port=addr[1],
             ip_version=IPVersion.NONE,
             interface_type=IFType.OTHER,
             sequence_number=0,
-            is_validated=True,
         )
         perceived_local_address = self._find_local_address(local_addr)
         assert perceived_local_address is not None, "local address must be known"
 
         self._perceived_remote_addresses = [perceived_remote_address]
+        self._set_initial_address(perceived_local_address)
         self._version = self._configuration.supported_versions[0]
         isenduniflow = self._sending_uniflows[0]
         isenduniflow.state = UniflowState.ACTIVE
-        isenduniflow.local_address_id = perceived_local_address.address_id
-        isenduniflow.source_address = (
-            perceived_local_address.ip_address,
-            perceived_local_address.port,
-        )
-        isenduniflow.destination_address = (
-            perceived_remote_address.ip_address,
-            perceived_remote_address.port,
-        )
+        isenduniflow.source_address = perceived_local_address
+        isenduniflow.destination_address = perceived_remote_address
+        isenduniflow.path_is_validated = True
 
         irecvuniflow = self._receiving_uniflows[0]
-        irecvuniflow.source_address = (
-            perceived_remote_address.ip_address,
-            perceived_remote_address.port,
-        )
-        irecvuniflow.destination_address = (
-            perceived_local_address.ip_address,
-            perceived_local_address.port,
-        )
+        irecvuniflow.source_address = perceived_remote_address
+        irecvuniflow.destination_address = perceived_local_address
 
-        # print(
-        #     "CONNECT set sending uniflow 0 source address: ",
-        #     irecvuniflow.source_address,
-        #     "\nCONNECT set sending uniflow 0 destination address: ",
-        #     irecvuniflow.destination_address,
-        #     "\nCONNECT set receiving uniflow 0 source address: ",
-        #     irecvuniflow.source_address,
-        #     "\nCONNECT set receiving uniflow 0 destination address: ",
-        #     irecvuniflow.destination_address,
-        # )
+        print(
+            "CONNECT set sending uniflow 0 source address: ",
+            (dump_address(isenduniflow.source_address)),
+            "\nCONNECT set sending uniflow 0 destination address: ",
+            (dump_address(isenduniflow.destination_address)),
+            "\nCONNECT set receiving uniflow 0 source address: ",
+            (dump_address(irecvuniflow.source_address)),
+            "\nCONNECT set receiving uniflow 0 destination address: ",
+            (dump_address(irecvuniflow.destination_address)),
+        )
         self._connect(now=now)
 
     def datagrams_to_send(
@@ -721,15 +711,12 @@ class QuicConnection:
         if self._state in END_STATES:
             return []
 
+        # bind unused uniflows to addresses and send path challenges
+        sending_uniflows_list = self._bind_unused_uniflows(now)
+
         # TODO packet scheduling
         selected_uniflow = self._sending_uniflows[0]
-        if (
-            selected_uniflow.uniflow_id == 0
-            and len(self._receiving_uniflows[0].perceived_remote_addresses) > 0
-        ):
-            network_path = self._receiving_uniflows[0].perceived_remote_addresses[0]
-        else:
-            network_path = self._perceived_remote_addresses[0]
+        network_path = selected_uniflow.destination_address
 
         # build datagrams
         builder = QuicPacketBuilder(
@@ -770,7 +757,10 @@ class QuicConnection:
                 builder.max_flight_bytes = PACKET_MAX_SIZE
 
             # limit data on un-validated network paths
-            if not network_path.is_validated:
+            if (
+                selected_uniflow.uniflow_id == 0
+                and not selected_uniflow.path_is_validated
+            ):
                 builder.max_total_bytes = (
                     network_path.bytes_received * 3 - network_path.bytes_sent
                 )
@@ -779,7 +769,7 @@ class QuicConnection:
                 if not self._handshake_confirmed:
                     for epoch in [tls.Epoch.INITIAL, tls.Epoch.HANDSHAKE]:
                         self._write_handshake(builder, epoch, now)
-                self._write_application(builder, network_path, now)
+                self._write_application(builder, selected_uniflow, now)
             except QuicPacketBuilderStop:
                 pass
 
@@ -824,7 +814,7 @@ class QuicConnection:
                 self._discard_epoch(tls.Epoch.INITIAL)
 
         # return datagrams to send and the destination network address
-        ret = []
+        ret = sending_uniflows_list
         for datagram in datagrams:
             byte_length = len(datagram)
             network_path.bytes_sent += byte_length
@@ -833,7 +823,10 @@ class QuicConnection:
                 (
                     datagram,
                     (network_path.ip_address, network_path.port),
-                    selected_uniflow.source_address,
+                    (
+                        selected_uniflow.source_address.ip_address,
+                        selected_uniflow.source_address.port,
+                    ),
                 )
             )
             # print("sending from", ret[-1][2], "to", ret[-1][1])
@@ -875,6 +868,14 @@ class QuicConnection:
             if self._pacing_at is not None and self._pacing_at < timer_at:
                 timer_at = self._pacing_at
 
+            # path challenge timer
+            for suniflow in self._sending_uniflows.values():
+                if (
+                    suniflow.path_challenge_at is not None
+                    and suniflow.path_challenge_at < timer_at
+                ):
+                    timer_at = suniflow.path_challenge_at
+
         return timer_at
 
     def handle_timer(self, now: float) -> None:
@@ -901,6 +902,16 @@ class QuicConnection:
         if self._loss_at is not None and now >= self._loss_at:
             self._logger.debug("Loss detection triggered")
             self._loss.on_loss_detection_timeout(now=now)
+
+        # path validation failed
+        for suniflow in self._sending_uniflows.values():
+            if (
+                suniflow.path_challenge_at is not None
+                and now >= suniflow.path_challenge_at
+            ):
+                suniflow.reset()
+                self.change_connection_id(suniflow.uniflow_id)
+                print("Uniflow " + str(suniflow.uniflow_id) + "path challenge timeout")
 
     def next_event(self) -> Optional[events.QuicEvent]:
         """
@@ -1075,40 +1086,29 @@ class QuicConnection:
                     header.packet_type == PACKET_TYPE_INITIAL
                 ), "first packet must be INITIAL"
                 self._perceived_remote_addresses = [perceived_remote_address]
+                perceived_remote_address.address_id = 0
+                self._set_initial_address(perceived_local_address)
                 self._version = QuicProtocolVersion(header.version)
 
                 isenduniflow = self._sending_uniflows[0]
                 isenduniflow.state = UniflowState.ACTIVE
-                isenduniflow.local_address_id = perceived_local_address.address_id
-                isenduniflow.source_address = (
-                    perceived_local_address.ip_address,
-                    perceived_local_address.port,
-                )
-                isenduniflow.destination_address = (
-                    perceived_remote_address.ip_address,
-                    perceived_remote_address.port,
-                )
+                isenduniflow.source_address = perceived_local_address
+                isenduniflow.destination_address = perceived_remote_address
 
                 irecvuniflow = self._receiving_uniflows[0]
-                irecvuniflow.source_address = (
-                    perceived_remote_address.ip_address,
-                    perceived_remote_address.port,
-                )
-                irecvuniflow.destination_address = (
-                    perceived_local_address.ip_address,
-                    perceived_local_address.port,
-                )
+                irecvuniflow.source_address = perceived_remote_address
+                irecvuniflow.destination_address = perceived_local_address
 
-                # print(
-                #     "INITIALIZE set sending uniflow 0 source address: ",
-                #     irecvuniflow.source_address,
-                #     "\nINITIALIZE set sending uniflow 0 destination address:",
-                #     irecvuniflow.destination_address,
-                #     "\nINITIALIZE set receiving uniflow 0 source address: ",
-                #     irecvuniflow.source_address,
-                #     "\nINITIALIZE set receiving uniflow 0 destination address:",
-                #     irecvuniflow.destination_address,
-                # )
+                print(
+                    "INITIALIZE set sending uniflow 0 source address: ",
+                    (dump_address(isenduniflow.source_address)),
+                    "\nINITIALIZE set sending uniflow 0 destination address: ",
+                    (dump_address(isenduniflow.destination_address)),
+                    "\nINITIALIZE set receiving uniflow 0 source address: ",
+                    (dump_address(irecvuniflow.source_address)),
+                    "\nINITIALIZE set receiving uniflow 0 destination address: ",
+                    (dump_address(irecvuniflow.destination_address)),
+                )
                 self._initialize(header.destination_cid)
 
             # determine crypto and packet space
@@ -1218,6 +1218,7 @@ class QuicConnection:
             context = QuicReceiveContext(
                 epoch=epoch,
                 host_cid=header.destination_cid,
+                receiving_uniflow=srecvuniflow,
                 perceived_address=perceived_remote_address,
                 quic_logger_frames=quic_logger_frames,
                 time=now,
@@ -1254,59 +1255,56 @@ class QuicConnection:
                 self.change_connection_id(srecvuniflow.uniflow_id)
 
             # update network path
-            if not perceived_remote_address.is_validated and epoch == tls.Epoch.HANDSHAKE:
+            if (
+                epoch == tls.Epoch.HANDSHAKE
+                and not self._sending_uniflows[0].path_is_validated
+            ):
                 self._logger.debug(
                     "Network path %s validated by handshake",
-                    (perceived_remote_address.ip_address, perceived_remote_address.port),
+                    (dump_address(perceived_remote_address)),
                 )
-                perceived_remote_address.is_validated = True
-            perceived_remote_address.bytes_received += end_off - start_off
+                self._sending_uniflows[0].path_is_validated = True
 
             if perceived_remote_address not in self._perceived_remote_addresses:
                 self._perceived_remote_addresses.append(perceived_remote_address)
             if perceived_remote_address not in srecvuniflow.perceived_remote_addresses:
                 srecvuniflow.perceived_remote_addresses.append(perceived_remote_address)
 
+            perceived_remote_address.bytes_received += end_off - start_off
+
             # check if changes were made to the 4-tuple
-            if srecvuniflow.source_address != (perceived_remote_address.ip_address, perceived_remote_address.port):
+            # Todo: handle section 9.5
+            if srecvuniflow.source_address != perceived_remote_address:
                 if srecvuniflow.source_address is None:
-                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new source address")
-                    srecvuniflow.source_address = (perceived_remote_address.ip_address, perceived_remote_address.port)
+                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new source address")
+                    srecvuniflow.source_address = perceived_remote_address
                 else:
-                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected source address change")
+                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected source address change")
                     idx = srecvuniflow.perceived_remote_addresses.index(perceived_remote_address)
-                    if idx and not is_probing and packet_number > space.largest_received_packet:
+                    if (
+                        idx
+                        and not is_probing
+                        and packet_number > space.largest_received_packet
+                    ):
                         self._logger.debug(
                             "Network path %s promoted",
-                            (perceived_remote_address.ip_address, perceived_remote_address.port)
+                            (dump_address(perceived_remote_address)),
                         )
                         srecvuniflow.perceived_remote_addresses.pop(idx)
                         srecvuniflow.perceived_remote_addresses.insert(0, perceived_remote_address)
-                        srecvuniflow.source_address = (
-                            perceived_remote_address.ip_address,
-                            perceived_remote_address.port,
-                        )
+                        srecvuniflow.source_address = perceived_remote_address
                         if srecvuniflow.uniflow_id == 0:
-                            self._sending_uniflows[0].destination_address = (
-                                perceived_remote_address.ip_address, perceived_remote_address.port
-                            )
+                            self._sending_uniflows[0].destination_address = perceived_remote_address
+                            self._sending_uniflows[0].path_is_validated = False
 
             if srecvuniflow.destination_address != perceived_local_address:
                 if srecvuniflow.destination_address is None:
-                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new destination address")
+                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new destination address")
                     pass
                 else:
-                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected destination address change")
+                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected destination address change")
                     pass
-                srecvuniflow.destination_address = (
-                    perceived_local_address.ip_address,
-                    perceived_remote_address.port,
-                )
-
-            # update the address id when it changed to a known address
-            if srecvuniflow.local_address_id is None and perceived_remote_address.address_id is not None:
-                srecvuniflow.local_address_id = perceived_remote_address.address_id
-                # print("detected a communicated address: " + str(perceived_address.address_id))
+                srecvuniflow.destination_address = perceived_local_address
 
             # record packet as received
             if not space.discarded:
@@ -1450,7 +1448,134 @@ class QuicConnection:
             self._loss.discard_space(self._spaces[epoch])
             self._spaces[epoch].discarded = True
 
-    def _find_address(self, addr: NetworkAddress) -> MPNetworkAddress:
+    def _bind_unused_uniflows(
+        self, now: float
+    ) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
+        ret = []
+        # fixme: change the behaviour of starting to use new sending uniflows
+        if (
+            self._state == QuicConnectionState.CONNECTED
+            and len(self._remote_addresses.keys()) > 1
+        ):
+            for suniflow in self._sending_uniflows.values():
+                if (
+                    suniflow.state == UniflowState.UNUSED
+                    and suniflow.source_address is None
+                    and suniflow.destination_address is None
+                    and len(suniflow.cid_available) > 0
+                ):
+                    rsaid = random.choice(list(self._local_addresses.keys()))
+                    source_address = self._local_addresses[rsaid]
+                    rdaid = random.choice(list(self._remote_addresses.keys()))
+                    destination_address = self._remote_addresses[rdaid]
+                    suniflow.source_address = source_address
+                    suniflow.destination_address = destination_address
+                    suniflow.local_challenge = os.urandom(8)
+
+                    print(
+                        "set sending uniflow "
+                        + str(suniflow.uniflow_id)
+                        + " source address: ",
+                        (dump_address(suniflow.source_address)),
+                        "\nset sending uniflow "
+                        + str(suniflow.uniflow_id)
+                        + " destination address: ",
+                        (dump_address(suniflow.destination_address)),
+                    )
+
+                    builder = QuicPacketBuilder(
+                        host_cid=self._receiving_uniflows[0].cid,
+                        is_client=self._is_client,
+                        packet_number=suniflow.packet_number,
+                        peer_cid=suniflow.cid.cid,
+                        peer_token=suniflow.token,
+                        quic_logger=self._quic_logger,
+                        spin_bit=self._spin_bit,
+                        version=self._version,
+                    )
+
+                    try:
+                        crypto = self._cryptos[tls.Epoch.ONE_RTT]
+                        packet_type = PACKET_TYPE_ONE_RTT
+
+                        builder.start_packet(packet_type, crypto)
+
+                        self._write_path_challenge_frame(
+                            builder=builder, challenge=suniflow.local_challenge
+                        )
+
+                    except QuicPacketBuilderStop:
+                        pass
+
+                    datagrams, packets = builder.flush()
+
+                    if datagrams:
+                        suniflow.packet_number = builder.packet_number
+
+                        for packet in packets:
+                            # log packet
+                            if self._quic_logger is not None:
+                                self._quic_logger.log_event(
+                                    category="transport",
+                                    event="packet_sent",
+                                    data={
+                                        "packet_type": self._quic_logger.packet_type(
+                                            packet.packet_type
+                                        ),
+                                        "header": {
+                                            "packet_number": str(packet.packet_number),
+                                            "packet_size": packet.sent_bytes,
+                                            "scid": dump_cid(
+                                                self._receiving_uniflows[0].cid
+                                            )
+                                            if is_long_header(packet.packet_type)
+                                            else "",
+                                            "dcid": dump_cid(suniflow.cid.cid),
+                                        },
+                                        "frames": packet.quic_logger_frames,
+                                    },
+                                )
+
+                    for datagram in datagrams:
+                        byte_length = len(datagram)
+                        suniflow.destination_address.bytes_sent += byte_length
+
+                        ret.append(
+                            (
+                                datagram,
+                                (
+                                    suniflow.destination_address.ip_address,
+                                    suniflow.destination_address.port,
+                                ),
+                                (
+                                    suniflow.source_address.ip_address,
+                                    suniflow.source_address.port,
+                                ),
+                            )
+                        )
+
+                        if self._quic_logger is not None:
+                            self._quic_logger.log_event(
+                                category="transport",
+                                event="datagrams_sent",
+                                data={"byte_length": byte_length, "count": 1},
+                            )
+                suniflow.path_challenge_at = now + max(
+                    3 * self._loss._pto_count, 6 * self._configuration.initial_rtt
+                )
+        if len(ret) > 0:
+            self._uniflows_seq += 1
+            self._uniflows_pending = True
+        return ret
+
+    def _set_initial_address(self, address: EndpointAddress):
+        swap_address_id = address.address_id
+        swap = self._local_addresses[0]
+        address.address_id = 0
+        self._local_addresses[0] = address
+        self._local_addresses[swap_address_id] = swap
+
+    def _find_address(self, addr: NetworkAddress) -> EndpointAddress:
         # check existing perceived addresses
         for idx, address in enumerate(self._perceived_remote_addresses):
             if address.ip_address == addr[0]:
@@ -1461,21 +1586,20 @@ class QuicConnection:
                     return address
 
         # new perceived address
-        address = MPNetworkAddress(
+        address = EndpointAddress(
             address_id=None,
             ip_version=IPVersion.NONE,
             interface_type=IFType.OTHER,
             ip_address=addr[0],
             port=addr[1],
             sequence_number=0,
-            is_validated=False,
         )
         self._logger.debug("Network path %s discovered", addr)
         return address
 
     def _find_local_address(
         self, local_addr: NetworkAddress
-    ) -> Optional[MPNetworkAddress]:
+    ) -> Optional[EndpointAddress]:
         # check existing local addresses
         for idx, address in self._local_addresses.items():
             if address.ip_address == local_addr[0]:
@@ -2127,7 +2251,7 @@ class QuicConnection:
                 self._quic_logger.encode_path_challenge_frame(data=data)
             )
 
-        context.perceived_address.remote_challenge = data
+        context.receiving_uniflow.remote_challenge = data
 
     def _handle_path_response_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2143,17 +2267,31 @@ class QuicConnection:
                 self._quic_logger.encode_path_response_frame(data=data)
             )
 
-        if data != context.perceived_address.local_challenge:
+        # find the uniflow that sent the challenge
+        found_uniflow = None
+        for runiflow in self._sending_uniflows.values():
+            if not runiflow.path_is_validated and runiflow.local_challenge is not None:
+                if runiflow.local_challenge == data:
+                    found_uniflow = runiflow
+                    break
+
+        if found_uniflow is None:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
                 frame_type=frame_type,
                 reason_phrase="Response does not match challenge",
             )
+
+        # path is validated
         self._logger.debug(
             "Perceived %s validated by challenge",
             (context.perceived_address.ip_address, context.perceived_address.port),
         )
-        context.perceived_address.is_validated = True
+
+        found_uniflow.local_challenge = None
+        found_uniflow.path_challenge_at = None
+        found_uniflow.path_is_validated = True
+        print("SEND Uniflow " + str(found_uniflow.uniflow_id) + " path is validated")
 
     def _handle_ping_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2653,33 +2791,46 @@ class QuicConnection:
                     port=port,
                 )
             )
-        # check if we already have a perceived address with the same ip and port
-        address = None
-        for i in range(len(self._perceived_remote_addresses)):
-            addr = self._perceived_remote_addresses[i]
-            if ip_address == addr.ip_address and port == addr.port:
-                address = addr
-
-        if address:
-            # update address
-            address.ip_version = ip_version
-            address.interface_type = interface_type
-            address.sequence_number = sequence_number
-            address.address_id = address_id
-            self._remote_addresses[address_id] = address
+        # check if we already have a communicated address with the same address_id
+        if address_id in self._remote_addresses.keys():
+            address = self._remote_addresses[address_id]
+            # check the sequence number
+            if sequence_number > address.sequence_number:
+                address.ip_version = ip_version
+                address.interface_type = interface_type
+                address.ip_address = ip_address
+                address.port = port
+                address.sequence_number = sequence_number
+                address.is_enabled = True
         else:
-            # add address
-            new_address = MPNetworkAddress(
-                address_id=address_id,
-                ip_version=ip_version,
-                interface_type=interface_type,
-                ip_address=ip_address,
-                port=port,
-                sequence_number=sequence_number,
-                is_validated=False,
-            )
-            self._remote_addresses[address_id] = new_address
-            self._perceived_remote_addresses.append(new_address)
+            # check if we already have a perceived address with the same ip and port
+            address = None
+            for i in range(len(self._perceived_remote_addresses)):
+                addr = self._perceived_remote_addresses[i]
+                if ip_address == addr.ip_address and port == addr.port:
+                    address = addr
+
+            if address:
+                # update address
+                address.address_id = address_id
+                address.ip_version = ip_version
+                address.interface_type = interface_type
+                address.sequence_number = sequence_number
+                address.is_enabled = True
+
+                self._remote_addresses[address_id] = address
+            else:
+                # add address
+                new_address = EndpointAddress(
+                    address_id=address_id,
+                    ip_version=ip_version,
+                    interface_type=interface_type,
+                    ip_address=ip_address,
+                    port=port,
+                    sequence_number=sequence_number,
+                )
+                self._remote_addresses[address_id] = new_address
+                self._perceived_remote_addresses.append(new_address)
 
     def _handle_remove_address_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2706,9 +2857,16 @@ class QuicConnection:
                 )
             )
 
-        self._remote_addresses[address_id].sequence_number = sequence_number
-        self._remote_addresses[address_id].is_removed = True
-        # TODO: clear uniflows that use this address
+        if address_id in self._remote_addresses.keys():
+            address = self._remote_addresses[address_id]
+            # check the sequence number
+            if sequence_number > address.sequence_number:
+                self._remote_addresses[address_id].sequence_number = sequence_number
+                self._remote_addresses[address_id].is_enabled = False
+                # reset all the uniflows using this address
+                for uniflow in self._sending_uniflows.values():
+                    if uniflow.destination_address is address:
+                        uniflow.reset()
 
     def _handle_uniflows_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2725,7 +2883,22 @@ class QuicConnection:
             )
 
         sequence_number = buf.pull_uint_var()
-        receiving_uniflows, active_sending_uniflows = pull_uniflow_frame(buf)
+        rcvUni = buf.pull_uint_var()
+        sndUni = buf.pull_uint_var()
+        receiving_uniflows = []
+        active_sending_uniflows = []
+        for _ in range(rcvUni):
+            uniflow_id = buf.pull_uint_var()
+            local_address_id = buf.pull_uint8()
+            receiving_uniflows.append(
+                {"uniflow_id": uniflow_id, "local_address_id": local_address_id}
+            )
+        for _ in range(sndUni):
+            uniflow_id = buf.pull_uint_var()
+            local_address_id = buf.pull_uint8()
+            active_sending_uniflows.append(
+                {"uniflow_id": uniflow_id, "local_address_id": local_address_id}
+            )
 
         # log frame
         if self._quic_logger is not None:
@@ -2738,8 +2911,62 @@ class QuicConnection:
             )
 
         if sequence_number > self._remote_uniflows_seq:
-            pass
-            # Todo
+            self._remote_uniflows_seq = sequence_number
+            for asuniflow in active_sending_uniflows:
+                uniflow_id = asuniflow["uniflow_id"]
+                local_address_id = asuniflow["local_address_id"]
+
+                # sanity check
+                if (
+                    uniflow_id not in self._receiving_uniflows.keys()
+                    or local_address_id not in self._remote_addresses.keys()
+                ):
+                    raise QuicConnectionError(
+                        error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                        frame_type=frame_type,
+                        reason_phrase="Multipath frame contains invalid ids",
+                    )
+
+                specified_uniflow = self._receiving_uniflows[uniflow_id]
+                perceived_address = specified_uniflow.source_address
+                specified_address = self._remote_addresses[local_address_id]
+
+                # 4 possibilities: receiving uniflow source address
+                # 1: is None, 2: address_id is None, 3: address_id is same value, 4: address_id is other value
+                if perceived_address is None:
+                    # receiving uniflow doesn't have a source address yet
+                    specified_uniflow.source_address = specified_address
+                    specified_uniflow.perceived_remote_addresses.append(specified_address)
+                elif perceived_address.address_id is None:
+                    # link the perceived address to the communicated address
+                    specified_address.ip_address = perceived_address.ip_address
+                    specified_address.port = perceived_address.port
+                    specified_uniflow.source_address = specified_address
+                    for i in range(len(specified_uniflow.perceived_remote_addresses)):
+                        if specified_uniflow.perceived_remote_addresses[i] is perceived_address:
+                            specified_uniflow.perceived_remote_addresses[i] = specified_address
+
+                    # update all other receiving uniflows that use this address
+                    for runiflow in self._receiving_uniflows.values():
+                        if runiflow.source_address is perceived_address:
+                            runiflow.source_address = specified_address
+                        for i in range(len(runiflow.perceived_remote_addresses)):
+                            if runiflow.perceived_remote_addresses[i] is perceived_address:
+                                runiflow.perceived_remote_addresses[i] = specified_address
+
+                    # sending uniflow destination addresses are based on the remote addresses
+                    # thus, the address is updated automatically
+
+                    self._perceived_remote_addresses.remove(perceived_address)
+                    # todo: retry path validation after the address update?
+                elif perceived_address.address_id == local_address_id:
+                    # same address
+                    pass
+                else:
+                    # not same address
+                    specified_uniflow.source_address = specified_address
+                    if specified_address not in specified_uniflow.perceived_remote_addresses:
+                        specified_uniflow.perceived_remote_addresses.insert(0, specified_address)
 
     def _log_key_retired(self, key_type: str, trigger: str) -> None:
         """
@@ -3192,9 +3419,6 @@ class QuicConnection:
             for i in range(1, self._peer_max_sending_uniflows_id + 1):
                 self._receiving_uniflows[i] = QuicReceivingUniflow(
                     uniflow_id=i,
-                    source_address=None,
-                    destination_address=None,
-                    local_address_id=None,
                     is_first=False,
                     configuration=self.configuration,
                 )
@@ -3202,16 +3426,15 @@ class QuicConnection:
             for i in range(1, int(self._max_sending_uniflows_id or 0) + 1):
                 self._sending_uniflows[i] = QuicSendingUniflow(
                     uniflow_id=i,
-                    source_address=None,
-                    destination_address=None,
-                    local_address_id=None,
-                    remote_address_id=None,
                     is_first=False,
                     configuration=self.configuration,
                 )
 
     def _write_application(
-        self, builder: QuicPacketBuilder, network_path: MPNetworkAddress, now: float
+        self,
+        builder: QuicPacketBuilder,
+        selected_uniflow: QuicSendingUniflow,
+        now: float,
     ) -> None:
         crypto_stream: Optional[QuicStream] = None
         if self._cryptos[tls.Epoch.ONE_RTT].send.is_valid():
@@ -3243,23 +3466,27 @@ class QuicConnection:
                     self._write_handshake_done_frame(builder=builder)
                     self._handshake_done_pending = False
 
-                # PATH CHALLENGE
-                if (
-                    not network_path.is_validated
-                    and network_path.local_challenge is None
-                ):
-                    challenge = os.urandom(8)
-                    self._write_path_challenge_frame(
-                        builder=builder, challenge=challenge
-                    )
-                    network_path.local_challenge = challenge
+                # only perform these on sending uniflow 0
+                # Other uniflows should perform path challenges differently
+                if selected_uniflow.uniflow_id == 0:
+                    # PATH CHALLENGE
+                    if (
+                        not selected_uniflow.path_is_validated
+                        and selected_uniflow.local_challenge is None
+                    ):
+                        challenge = os.urandom(8)
+                        self._write_path_challenge_frame(
+                            builder=builder, challenge=challenge
+                        )
+                        selected_uniflow.local_challenge = challenge
 
                 # PATH RESPONSE
-                if network_path.remote_challenge is not None:
-                    self._write_path_response_frame(
-                        builder=builder, challenge=network_path.remote_challenge
-                    )
-                    network_path.remote_challenge = None
+                for runiflow in self._receiving_uniflows.values():
+                    if runiflow.remote_challenge is not None:
+                        self._write_path_response_frame(
+                            builder=builder, challenge=runiflow.remote_challenge
+                        )
+                    runiflow.remote_challenge = None
 
                 # NEW_CONNECTION_ID
                 riuniflow = self._receiving_uniflows[0]
@@ -3899,7 +4126,7 @@ class QuicConnection:
             )
 
     def _write_add_address_frame(
-        self, builder: QuicPacketBuilder, address: MPNetworkAddress
+        self, builder: QuicPacketBuilder, address: EndpointAddress
     ) -> None:
         frame_overhead = 2 + 1 + 1 + 8 + 1
         if address.ip_version == IPVersion.IPV4:
@@ -3944,7 +4171,7 @@ class QuicConnection:
             )
 
     def _write_remove_address_frame(
-        self, builder: QuicPacketBuilder, address: MPNetworkAddress
+        self, builder: QuicPacketBuilder, address: EndpointAddress
     ) -> None:
         buf = builder.start_frame(
             QuicFrameType.REMOVE_ADDRESS,
@@ -3968,13 +4195,28 @@ class QuicConnection:
         self, builder: QuicPacketBuilder, sequence_number: int
     ) -> None:
         frame_overhead = 1 + 8 + 8 + 8
-        rcount = len(self._receiving_uniflows.keys())
-        frame_overhead += rcount * (8 + 1)
-        scount = 0
+
+        usable_runiflows = []
+        for runiflow in self._receiving_uniflows.values():
+            if runiflow.source_address is not None:
+                usable_runiflows.append(
+                    {
+                        "uniflow_id": runiflow.uniflow_id,
+                        "local_address_id": runiflow.source_address.address_id,
+                    }
+                )
+                frame_overhead += 8 + 1
+
+        usable_suniflows = []
         for suniflow in self._sending_uniflows.values():
             if suniflow.state == UniflowState.ACTIVE:
+                usable_suniflows.append(
+                    {
+                        "uniflow_id": suniflow.uniflow_id,
+                        "local_address_id": suniflow.source_address.address_id,
+                    }
+                )
                 frame_overhead += 8 + 1
-                scount += 1
         buf = builder.start_frame(
             QuicFrameType.UNIFLOWS,
             capacity=frame_overhead,
@@ -3982,38 +4224,23 @@ class QuicConnection:
         )
 
         buf.push_uint_var(sequence_number)
-        buf.push_uint_var(rcount)
-        buf.push_uint_var(scount)
+        buf.push_uint_var(len(usable_runiflows))
+        buf.push_uint_var(len(usable_suniflows))
 
-        receiving_uniflows = []
-        active_sending_uniflows = []
+        for uruniflow in usable_runiflows:
+            buf.push_uint_var(uruniflow["uniflow_id"])
+            buf.push_uint8(uruniflow["local_address_id"])
 
-        for runiflow in self._receiving_uniflows.values():
-            buf.push_uint_var(runiflow.uniflow_id)
-            buf.push_uint8(runiflow.local_address_id)
-            receiving_uniflows.append(
-                {
-                    "uniflow_id": runiflow.uniflow_id,
-                    "local_address_id": runiflow.local_address_id,
-                }
-            )
-
-        for suniflow in self._sending_uniflows.values():
-            buf.push_uint_var(suniflow.uniflow_id)
-            buf.push_uint8(suniflow.local_address_id)
-            active_sending_uniflows.append(
-                {
-                    "uniflow_id": suniflow.uniflow_id,
-                    "local_address_id": suniflow.local_address_id,
-                }
-            )
+        for usuniflow in usable_suniflows:
+            buf.push_uint_var(usuniflow["uniflow_id"])
+            buf.push_uint8(usuniflow["local_address_id"])
 
         # log frame
         if self._quic_logger is not None:
             builder.quic_logger_frames.append(
                 self._quic_logger.encode_uniflows_frame(
                     sequence_number=sequence_number,
-                    receiving_uniflows=receiving_uniflows,
-                    active_sending_uniflows=active_sending_uniflows,
+                    receiving_uniflows=usable_runiflows,
+                    active_sending_uniflows=usable_suniflows,
                 )
             )

@@ -29,7 +29,9 @@ def client_receive_context(client, receiving_uniflow: int = 0, epoch=tls.Epoch.O
     return QuicReceiveContext(
         epoch=epoch,
         host_cid=client._receiving_uniflows[receiving_uniflow].cid,
-        perceived_address=client._perceived_remote_addresses[0],
+        receiving_uniflow=client._receiving_uniflows[receiving_uniflow],
+        perceived_address=client._receiving_uniflows[receiving_uniflow].source_address,
+        # perceived_address=client._perceived_remote_addresses[0],
         quic_logger_frames=[],
         time=asyncio.get_event_loop().time(),
     )
@@ -844,22 +846,16 @@ class QuicMPConnectionTest(TestCase):
             )
 
     # Todo fix address tests
-    """
     def test_mp_remove_address(self):
         address_id = 1
-        with client_and_server(
-            server_options={
-                "local_addresses": [
-                    ["::1", IPVersion.IPV6, IFType.FIXED, 4433],
-                    ["::1", IPVersion.IPV6, IFType.FIXED, 4444],
-                    ["::1", IPVersion.IPV6, IFType.FIXED, 4455],
-                ]
-            },
-        ) as (client, server):
+        with client_and_server() as (client, server):
+            server.add_address("2.3.4.5", 4444, IPVersion.IPV4, IFType.FIXED)
+            server.add_address("2.3.4.5", 4455, IPVersion.IPV4, IFType.FIXED)
+            self.assertEqual(transfer(server, client), 1)
+
             self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1, 2])
 
             # the server removes the second address, REMOVE_ADDRESS is sent
             server.remove_address(address_id)
             self.assertEqual(transfer(server, client), 1)
-            self.assertEqual(client._remote_addresses[address_id].is_removed, True)
-    """
+            self.assertEqual(client._remote_addresses[address_id].is_enabled, False)
