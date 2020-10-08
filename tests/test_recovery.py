@@ -8,8 +8,8 @@ from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.recovery import (
     QuicPacketPacer,
     QuicPacketRecovery,
-    QuicPacketSpace,
     QuicRttMonitor,
+    QuicSendingPacketSpace,
 )
 
 
@@ -63,9 +63,9 @@ class QuicPacketPacerTest(TestCase):
 
 class QuicPacketRecoveryTest(TestCase):
     def setUp(self):
-        self.INITIAL_SPACE = QuicPacketSpace()
-        self.HANDSHAKE_SPACE = QuicPacketSpace()
-        self.ONE_RTT_SPACE = QuicPacketSpace()
+        self.INITIAL_SPACE = QuicSendingPacketSpace()
+        self.HANDSHAKE_SPACE = QuicSendingPacketSpace()
+        self.ONE_RTT_SPACE = QuicSendingPacketSpace()
 
         self.recovery = QuicPacketRecovery(
             initial_rtt=0.1,
@@ -79,7 +79,7 @@ class QuicPacketRecoveryTest(TestCase):
         ]
 
     def test_discard_space(self):
-        self.recovery.discard_space(self.INITIAL_SPACE)
+        self.recovery.discard_sending_space(self.INITIAL_SPACE)
 
     def test_on_ack_received_ack_eliciting(self):
         packet = QuicSentPacket(

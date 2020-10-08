@@ -44,7 +44,13 @@ from .packet_builder import (
     QuicPacketBuilder,
     QuicPacketBuilderStop,
 )
-from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
+from .recovery import (
+    K_GRANULARITY,
+    QuicPacketRecovery,
+    QuicReceivingPacketSpace,
+    QuicSendingPacketSpace,
+    discard_receiving_space,
+)
 from .stream import FinalSizeError, QuicStream
 
 logger = logging.getLogger("quic")
@@ -257,6 +263,8 @@ class QuicReceivingUniflow:
 
         self.remote_challenge: Optional[bytes] = None
 
+        self.receiving_spaces: Dict[tls.Epoch, QuicReceivingPacketSpace] = {}
+
         self.perceived_remote_addresses: List[EndpointAddress] = []
 
 
@@ -267,6 +275,7 @@ class QuicSendingUniflow:
         uniflow_id: int,
         is_first: bool,
         configuration: QuicConfiguration,
+        quic_logger: Optional[QuicLoggerTrace] = None,
     ) -> None:
         self.uniflow_id: int = uniflow_id
         self.cid: QuicConnectionId = QuicConnectionId(
@@ -290,8 +299,22 @@ class QuicSendingUniflow:
         self.local_challenge: Optional[bytes] = None
         self.path_challenge_at: Optional[float] = None
 
+        self.probe_pending = False
+        self.loss_at: Optional[float] = None
+        self.pacing_at: Optional[float] = None
+
         # Congestion controller
         # Performance metrics
+        self.sending_spaces: Dict[tls.Epoch, QuicSendingPacketSpace] = {}
+        self.loss: QuicPacketRecovery = QuicPacketRecovery(
+            initial_rtt=configuration.initial_rtt,
+            peer_completed_address_validation=not configuration.is_client,
+            quic_logger=quic_logger,
+            send_probe=self.send_probe,
+        )
+
+    def send_probe(self):
+        self.probe_pending = True
 
     def reset(self) -> None:
         self.state = UniflowState.UNUSED
@@ -300,6 +323,9 @@ class QuicSendingUniflow:
         self.path_is_validated = False
         self.local_challenge = None
         self.path_challenge_at = None
+        self.probe_pending = False
+        self.loss_at = None
+        self.pacing_at = None
         # reset congestion controller and performance metrics
 
 
@@ -406,8 +432,8 @@ class QuicConnection:
         self._local_max_streams_uni = Limit(
             frame_type=QuicFrameType.MAX_STREAMS_UNI, name="max_streams_uni", value=128
         )
-        self._loss_at: Optional[float] = None
-        self._pacing_at: Optional[float] = None
+        # self._loss_at: Optional[float] = None
+        # self._pacing_at: Optional[float] = None
         self._parameters_received = False
         self._quic_logger: Optional[QuicLoggerTrace] = None
         self._remote_ack_delay_exponent = 3
@@ -423,7 +449,12 @@ class QuicConnection:
         self._remote_max_streams_uni = 0
         self._retry_count = 0
         self._retry_source_connection_id = retry_source_connection_id
-        self._spaces: Dict[tls.Epoch, QuicPacketSpace] = {}
+        # self._receiving_spaces: Dict[int, Dict[tls.Epoch, QuicReceivingPacketSpace]] = {
+        #     0: {}
+        # }
+        # self._sending_spaces: Dict[int, Dict[tls.Epoch, QuicSendingPacketSpace]] = {
+        #     0: {}
+        # }
         self._spin_bit = False
         self._spin_highest_pn = 0
         self._state = QuicConnectionState.FIRSTFLIGHT
@@ -475,19 +506,19 @@ class QuicConnection:
             )
 
         # loss recovery
-        self._loss = QuicPacketRecovery(
-            initial_rtt=configuration.initial_rtt,
-            peer_completed_address_validation=not self._is_client,
-            quic_logger=self._quic_logger,
-            send_probe=self._send_probe,
-        )
+        # self._loss = QuicPacketRecovery(
+        #     initial_rtt=configuration.initial_rtt,
+        #     peer_completed_address_validation=not self._is_client,
+        #     quic_logger=self._quic_logger,
+        #     send_probe=self._send_probe,
+        # )
 
         # things to send
         self._close_pending = False
         self._datagrams_pending: Deque[bytes] = deque()
         self._handshake_done_pending = False
         self._ping_pending: List[int] = []
-        self._probe_pending = False
+        # self._probe_pending = False
         self._streams_blocked_pending = False
         self._removed_addresses: List[int] = []
         self._uniflows_pending = False
@@ -683,7 +714,7 @@ class QuicConnection:
         irecvuniflow.source_address = perceived_remote_address
         irecvuniflow.destination_address = perceived_local_address
 
-        print(
+        """print(
             "CONNECT set sending uniflow 0 source address: ",
             (dump_address(isenduniflow.source_address)),
             "\nCONNECT set sending uniflow 0 destination address: ",
@@ -692,7 +723,7 @@ class QuicConnection:
             (dump_address(irecvuniflow.source_address)),
             "\nCONNECT set receiving uniflow 0 destination address: ",
             (dump_address(irecvuniflow.destination_address)),
-        )
+        )"""
         self._connect(now=now)
 
     def datagrams_to_send(
@@ -751,9 +782,13 @@ class QuicConnection:
         else:
             # congestion control
             builder.max_flight_bytes = (
-                self._loss.congestion_window - self._loss.bytes_in_flight
+                selected_uniflow.loss.congestion_window
+                - selected_uniflow.loss.bytes_in_flight
             )
-            if self._probe_pending and builder.max_flight_bytes < PACKET_MAX_SIZE:
+            if (
+                selected_uniflow.probe_pending
+                and builder.max_flight_bytes < PACKET_MAX_SIZE
+            ):
                 builder.max_flight_bytes = PACKET_MAX_SIZE
 
             # limit data on un-validated network paths
@@ -782,9 +817,8 @@ class QuicConnection:
             sent_handshake = False
             for packet in packets:
                 packet.sent_time = now
-                self._loss.on_packet_sent(
-                    packet=packet, space=self._spaces[packet.epoch]
-                )
+                space = selected_uniflow.sending_spaces[packet.epoch]
+                selected_uniflow.loss.on_packet_sent(packet=packet, space=space)
                 if packet.epoch == tls.Epoch.HANDSHAKE:
                     sent_handshake = True
 
@@ -855,20 +889,23 @@ class QuicConnection:
         timer_at = self._close_at
         if self._state not in END_STATES:
             # ack timer
-            for space in self._loss.spaces:
-                if space.ack_at is not None and space.ack_at < timer_at:
-                    timer_at = space.ack_at
+            for runiflow in self._receiving_uniflows.values():
+                for space in runiflow.receiving_spaces.values():
+                    if space.ack_at is not None and space.ack_at < timer_at:
+                        timer_at = space.ack_at
 
             # loss detection timer
-            self._loss_at = self._loss.get_loss_detection_time()
-            if self._loss_at is not None and self._loss_at < timer_at:
-                timer_at = self._loss_at
+            for suniflow in self._sending_uniflows.values():
+                suniflow.loss_at = suniflow.loss.get_loss_detection_time()
+                if suniflow.loss_at is not None and suniflow.loss_at < timer_at:
+                    timer_at = suniflow.loss_at
 
-            # pacing timer
-            if self._pacing_at is not None and self._pacing_at < timer_at:
-                timer_at = self._pacing_at
+                # pacing timer
+                if suniflow.pacing_at is not None and suniflow.pacing_at < timer_at:
+                    timer_at = suniflow.pacing_at
 
             # path challenge timer
+            # todo: change this to detect with loss
             for suniflow in self._sending_uniflows.values():
                 if (
                     suniflow.path_challenge_at is not None
@@ -899,9 +936,12 @@ class QuicConnection:
             return
 
         # loss detection timeout
-        if self._loss_at is not None and now >= self._loss_at:
-            self._logger.debug("Loss detection triggered")
-            self._loss.on_loss_detection_timeout(now=now)
+        for suniflow in self._sending_uniflows.values():
+            if suniflow.loss_at is not None and now >= suniflow.loss_at:
+                self._logger.debug(
+                    "uniflow " + str(suniflow.uniflow_id) + " Loss detection triggered"
+                )
+                suniflow.loss.on_loss_detection_timeout(now=now)
 
         # path validation failed
         for suniflow in self._sending_uniflows.values():
@@ -1099,7 +1139,7 @@ class QuicConnection:
                 irecvuniflow.source_address = perceived_remote_address
                 irecvuniflow.destination_address = perceived_local_address
 
-                print(
+                """print(
                     "INITIALIZE set sending uniflow 0 source address: ",
                     (dump_address(isenduniflow.source_address)),
                     "\nINITIALIZE set sending uniflow 0 destination address: ",
@@ -1108,17 +1148,17 @@ class QuicConnection:
                     (dump_address(irecvuniflow.source_address)),
                     "\nINITIALIZE set receiving uniflow 0 destination address: ",
                     (dump_address(irecvuniflow.destination_address)),
-                )
+                )"""
                 self._initialize(header.destination_cid)
 
             # determine crypto and packet space
             epoch = get_epoch(header.packet_type)
             crypto = self._cryptos[epoch]
+            spaces = srecvuniflow.receiving_spaces
             if epoch == tls.Epoch.ZERO_RTT:
-                # TODO provide packet space for every uniflow
-                space = self._spaces[tls.Epoch.ONE_RTT]
+                space = spaces[tls.Epoch.ONE_RTT]
             else:
-                space = self._spaces[epoch]
+                space = spaces[epoch]
 
             # decrypt packet
             encrypted_off = buf.tell() - start_off
@@ -1223,6 +1263,8 @@ class QuicConnection:
                 quic_logger_frames=quic_logger_frames,
                 time=now,
             )
+            is_ack_eliciting = False
+            is_probing = False
             try:
                 is_ack_eliciting, is_probing = self._payload_received(
                     context, plain_payload
@@ -1408,7 +1450,12 @@ class QuicConnection:
         """
         Begin the close procedure.
         """
-        self._close_at = now + 3 * self._loss.get_probe_timeout()
+        timeout = self._sending_uniflows[0].loss.get_probe_timeout()
+        for suniflow in self._sending_uniflows.values():
+            uniflow_timeout = suniflow.loss.get_probe_timeout()
+            if uniflow_timeout < timeout:
+                timeout = uniflow_timeout
+        self._close_at = now + 3 * timeout
         if is_initiator:
             self._set_state(QuicConnectionState.CLOSING)
         else:
@@ -1419,7 +1466,7 @@ class QuicConnection:
         End the close procedure.
         """
         self._close_at = None
-        for epoch in self._spaces.keys():
+        for epoch in self._receiving_uniflows[0].receiving_spaces.keys():
             self._discard_epoch(epoch)
         self._events.append(self._close_event)
         self._set_state(QuicConnectionState.TERMINATED)
@@ -1442,11 +1489,19 @@ class QuicConnection:
         self._push_crypto_data()
 
     def _discard_epoch(self, epoch: tls.Epoch) -> None:
-        if not self._spaces[epoch].discarded:
-            self._logger.debug("Discarding epoch %s", epoch)
-            self._cryptos[epoch].teardown()
-            self._loss.discard_space(self._spaces[epoch])
-            self._spaces[epoch].discarded = True
+        for runiflow in self._receiving_uniflows.values():
+            if not runiflow.receiving_spaces[epoch].discarded:
+                self._logger.debug("discarding receiving epoch %s", epoch)
+                discard_receiving_space(runiflow.receiving_spaces[epoch])
+                runiflow.receiving_spaces[epoch].discarded = True
+
+        for suniflow in self._sending_uniflows.values():
+            if not suniflow.sending_spaces[epoch].discarded:
+                self._logger.debug("discarding sending epoch %s", epoch)
+                suniflow.loss.discard_sending_space(suniflow.sending_spaces[epoch])
+                suniflow.sending_spaces[epoch].discarded = True
+
+        self._cryptos[epoch].teardown()
 
     def _bind_unused_uniflows(
         self, now: float
@@ -1561,7 +1616,7 @@ class QuicConnection:
                                 data={"byte_length": byte_length, "count": 1},
                             )
                 suniflow.path_challenge_at = now + max(
-                    3 * self._loss._pto_count, 6 * self._configuration.initial_rtt
+                    3 * suniflow.loss._pto_count, 6 * self._configuration.initial_rtt
                 )
         if len(ret) > 0:
             self._uniflows_seq += 1
@@ -1795,17 +1850,24 @@ class QuicConnection:
             tls.Epoch.HANDSHAKE: QuicStream(),
             tls.Epoch.ONE_RTT: QuicStream(),
         }
-        self._spaces = {
-            tls.Epoch.INITIAL: QuicPacketSpace(),
-            tls.Epoch.HANDSHAKE: QuicPacketSpace(),
-            tls.Epoch.ONE_RTT: QuicPacketSpace(),
+        self._receiving_uniflows[0].receiving_spaces = {
+            tls.Epoch.INITIAL: QuicReceivingPacketSpace(),
+            tls.Epoch.HANDSHAKE: QuicReceivingPacketSpace(),
+            tls.Epoch.ONE_RTT: QuicReceivingPacketSpace(),
+        }
+        self._sending_uniflows[0].sending_spaces = {
+            tls.Epoch.INITIAL: QuicSendingPacketSpace(),
+            tls.Epoch.HANDSHAKE: QuicSendingPacketSpace(),
+            tls.Epoch.ONE_RTT: QuicSendingPacketSpace(),
         }
 
         self._cryptos[tls.Epoch.INITIAL].setup_initial(
             cid=peer_cid, is_client=self._is_client, version=self._version
         )
 
-        self._loss.spaces = list(self._spaces.values())
+        self._sending_uniflows[0].loss.spaces = list(
+            self._sending_uniflows[0].sending_spaces.values()
+        )
 
     def _handle_ack_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -1826,15 +1888,16 @@ class QuicConnection:
                 self._quic_logger.encode_ack_frame(ack_rangeset, ack_delay)
             )
 
+        suniflow = self._sending_uniflows[0]
         # check whether peer completed address validation
-        if not self._loss.peer_completed_address_validation and context.epoch in (
+        if not suniflow.loss.peer_completed_address_validation and context.epoch in (
             tls.Epoch.HANDSHAKE,
             tls.Epoch.ONE_RTT,
         ):
-            self._loss.peer_completed_address_validation = True
+            suniflow.loss.peer_completed_address_validation = True
 
-        self._loss.on_ack_received(
-            space=self._spaces[context.epoch],
+        suniflow.loss.on_ack_received(
+            space=suniflow.sending_spaces[context.epoch],
             ack_rangeset=ack_rangeset,
             ack_delay=ack_delay,
             now=context.time,
@@ -2022,7 +2085,7 @@ class QuicConnection:
         if not self._handshake_confirmed:
             self._discard_epoch(tls.Epoch.HANDSHAKE)
             self._handshake_confirmed = True
-            self._loss.peer_completed_address_validation = True
+            self._sending_uniflows[0].loss.peer_completed_address_validation = True
 
     def _handle_max_data_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2991,7 +3054,10 @@ class QuicConnection:
             )
 
     def _on_ack_delivery(
-        self, delivery: QuicDeliveryState, space: QuicPacketSpace, highest_acked: int
+        self,
+        delivery: QuicDeliveryState,
+        space: QuicReceivingPacketSpace,
+        highest_acked: int,
     ) -> None:
         """
         Callback when an ACK frame is acknowledged or lost.
@@ -3192,9 +3258,6 @@ class QuicConnection:
             self._crypto_streams[epoch].write(buf.data)
             buf.seek(0)
 
-    def _send_probe(self) -> None:
-        self._probe_pending = True
-
     def _parse_transport_parameters(
         self, data: bytes, from_session_ticket: bool = False
     ) -> None:
@@ -3275,7 +3338,8 @@ class QuicConnection:
             if quic_transport_parameters.ack_delay_exponent is not None:
                 self._remote_ack_delay_exponent = self._remote_ack_delay_exponent
             if quic_transport_parameters.max_ack_delay is not None:
-                self._loss.max_ack_delay = (
+                # fixme: set this for all uniflows
+                self._sending_uniflows[0].loss.max_ack_delay = (
                     quic_transport_parameters.max_ack_delay / 1000.0
                 )
         if quic_transport_parameters.active_connection_id_limit is not None:
@@ -3422,12 +3486,26 @@ class QuicConnection:
                     is_first=False,
                     configuration=self.configuration,
                 )
+                self._receiving_uniflows[i].receiving_spaces = {
+                    tls.Epoch.INITIAL: QuicReceivingPacketSpace(),
+                    tls.Epoch.HANDSHAKE: QuicReceivingPacketSpace(),
+                    tls.Epoch.ONE_RTT: QuicReceivingPacketSpace(),
+                }
                 self._replenish_connection_ids(i)
             for i in range(1, int(self._max_sending_uniflows_id or 0) + 1):
                 self._sending_uniflows[i] = QuicSendingUniflow(
                     uniflow_id=i,
                     is_first=False,
                     configuration=self.configuration,
+                    quic_logger=self._quic_logger,
+                )
+                self._sending_uniflows[i].sending_spaces = {
+                    tls.Epoch.INITIAL: QuicSendingPacketSpace(),
+                    tls.Epoch.HANDSHAKE: QuicSendingPacketSpace(),
+                    tls.Epoch.ONE_RTT: QuicSendingPacketSpace(),
+                }
+                self._sending_uniflows[i].loss.spaces = list(
+                    self._sending_uniflows[i].sending_spaces.values()
                 )
 
     def _write_application(
@@ -3446,13 +3524,16 @@ class QuicConnection:
             packet_type = PACKET_TYPE_ZERO_RTT
         else:
             return
-        space = self._spaces[tls.Epoch.ONE_RTT]
+        # Todo change this to select the correct uniflow
+        space = self._receiving_uniflows[0].receiving_spaces[tls.Epoch.ONE_RTT]
 
         while True:
             # apply pacing, except if we have ACKs to send
             if space.ack_at is None or space.ack_at >= now:
-                self._pacing_at = self._loss._pacer.next_send_time(now=now)
-                if self._pacing_at is not None:
+                selected_uniflow.pacing_at = (
+                    selected_uniflow.loss._pacer.next_send_time(now=now)
+                )
+                if selected_uniflow.pacing_at is not None:
                     break
             builder.start_packet(packet_type, crypto)
 
@@ -3576,9 +3657,9 @@ class QuicConnection:
                 self._ping_pending.clear()
 
             # PING (probe)
-            if self._probe_pending:
+            if selected_uniflow.probe_pending:
                 self._write_ping_frame(builder, comment="probe")
-                self._probe_pending = False
+                selected_uniflow.probe_pending = False
 
             # CRYPTO
             if crypto_stream is not None and not crypto_stream.send_buffer_is_empty:
@@ -3622,7 +3703,7 @@ class QuicConnection:
             if builder.packet_is_empty:
                 break
             else:
-                self._loss._pacer.update_after_send(now=now)
+                selected_uniflow.loss._pacer.update_after_send(now=now)
 
     def _write_handshake(
         self, builder: QuicPacketBuilder, epoch: tls.Epoch, now: float
@@ -3632,7 +3713,7 @@ class QuicConnection:
             return
 
         crypto_stream = self._crypto_streams[epoch]
-        space = self._spaces[epoch]
+        space = self._receiving_uniflows[0].receiving_spaces[epoch]
 
         while True:
             if epoch == tls.Epoch.INITIAL:
@@ -3650,11 +3731,11 @@ class QuicConnection:
                 if self._write_crypto_frame(
                     builder=builder, space=space, stream=crypto_stream
                 ):
-                    self._probe_pending = False
+                    self._sending_uniflows[0].probe_pending = False
 
             # PING (probe)
             if (
-                self._probe_pending
+                self._sending_uniflows[0].probe_pending
                 and not self._handshake_complete
                 and (
                     epoch == tls.Epoch.HANDSHAKE
@@ -3662,13 +3743,13 @@ class QuicConnection:
                 )
             ):
                 self._write_ping_frame(builder, comment="probe")
-                self._probe_pending = False
+                self._sending_uniflows[0].probe_pending = False
 
             if builder.packet_is_empty:
                 break
 
     def _write_ack_frame(
-        self, builder: QuicPacketBuilder, space: QuicPacketSpace, now: float
+        self, builder: QuicPacketBuilder, space: QuicReceivingPacketSpace, now: float
     ) -> None:
         # calculate ACK delay
         ack_delay = now - space.largest_received_time
@@ -3741,7 +3822,7 @@ class QuicConnection:
             )
 
     def _write_connection_limits(
-        self, builder: QuicPacketBuilder, space: QuicPacketSpace
+        self, builder: QuicPacketBuilder, space: QuicReceivingPacketSpace
     ) -> None:
         """
         Raise MAX_DATA or MAX_STREAMS if needed.
@@ -3774,7 +3855,10 @@ class QuicConnection:
                     )
 
     def _write_crypto_frame(
-        self, builder: QuicPacketBuilder, space: QuicPacketSpace, stream: QuicStream
+        self,
+        builder: QuicPacketBuilder,
+        space: QuicReceivingPacketSpace,
+        stream: QuicStream,
     ) -> bool:
         frame_overhead = 3 + size_uint_var(stream.next_send_offset)
         frame = stream.get_frame(builder.remaining_flight_space - frame_overhead)
@@ -3959,7 +4043,7 @@ class QuicConnection:
     def _write_stream_frame(
         self,
         builder: QuicPacketBuilder,
-        space: QuicPacketSpace,
+        space: QuicReceivingPacketSpace,
         stream: QuicStream,
         max_offset: int,
     ) -> int:
@@ -4006,7 +4090,10 @@ class QuicConnection:
             return 0
 
     def _write_stream_limits(
-        self, builder: QuicPacketBuilder, space: QuicPacketSpace, stream: QuicStream
+        self,
+        builder: QuicPacketBuilder,
+        space: QuicReceivingPacketSpace,
+        stream: QuicStream,
     ) -> None:
         """
         Raise MAX_STREAM_DATA if needed.

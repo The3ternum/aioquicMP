@@ -19,7 +19,7 @@ K_MINIMUM_WINDOW = 2 * K_MAX_DATAGRAM_SIZE
 K_LOSS_REDUCTION_FACTOR = 0.5
 
 
-class QuicPacketSpace:
+class QuicReceivingPacketSpace:
     def __init__(self) -> None:
         self.ack_at: Optional[float] = None
         self.ack_queue = RangeSet()
@@ -28,7 +28,11 @@ class QuicPacketSpace:
         self.largest_received_packet = -1
         self.largest_received_time: Optional[float] = None
 
+
+class QuicSendingPacketSpace:
+    def __init__(self) -> None:
         # sent packets and loss
+        self.discarded = False
         self.ack_eliciting_in_flight = 0
         self.largest_acked_packet = 0
         self.loss_time: Optional[float] = None
@@ -144,6 +148,10 @@ class QuicCongestionControl:
             self.ssthresh = self.congestion_window
 
 
+def discard_receiving_space(space: QuicReceivingPacketSpace) -> None:
+    space.ack_at = None
+
+
 class QuicPacketRecovery:
     """
     Packet loss and congestion controller.
@@ -158,7 +166,7 @@ class QuicPacketRecovery:
     ) -> None:
         self.max_ack_delay = 0.025
         self.peer_completed_address_validation = peer_completed_address_validation
-        self.spaces: List[QuicPacketSpace] = []
+        self.spaces: List[QuicSendingPacketSpace] = []
 
         # callbacks
         self._quic_logger = quic_logger
@@ -186,7 +194,7 @@ class QuicPacketRecovery:
     def congestion_window(self) -> int:
         return self._cc.congestion_window
 
-    def discard_space(self, space: QuicPacketSpace) -> None:
+    def discard_sending_space(self, space: QuicSendingPacketSpace) -> None:
         assert space in self.spaces
 
         self._cc.on_packets_expired(
@@ -194,7 +202,6 @@ class QuicPacketRecovery:
         )
         space.sent_packets.clear()
 
-        space.ack_at = None
         space.ack_eliciting_in_flight = 0
         space.loss_time = None
 
@@ -231,7 +238,7 @@ class QuicPacketRecovery:
 
     def on_ack_received(
         self,
-        space: QuicPacketSpace,
+        space: QuicSendingPacketSpace,
         ack_rangeset: RangeSet,
         ack_delay: float,
         now: float,
@@ -334,7 +341,9 @@ class QuicPacketRecovery:
 
             self._send_probe()
 
-    def on_packet_sent(self, packet: QuicSentPacket, space: QuicPacketSpace) -> None:
+    def on_packet_sent(
+        self, packet: QuicSentPacket, space: QuicSendingPacketSpace
+    ) -> None:
         space.sent_packets[packet.packet_number] = packet
 
         if packet.is_ack_eliciting:
@@ -349,7 +358,7 @@ class QuicPacketRecovery:
             if self._quic_logger is not None:
                 self._log_metrics_updated()
 
-    def _detect_loss(self, space: QuicPacketSpace, now: float) -> None:
+    def _detect_loss(self, space: QuicSendingPacketSpace, now: float) -> None:
         """
         Check whether any packets should be declared lost.
         """
@@ -376,7 +385,7 @@ class QuicPacketRecovery:
 
         self._on_packets_lost(lost_packets, space=space, now=now)
 
-    def _get_loss_space(self) -> Optional[QuicPacketSpace]:
+    def _get_loss_space(self) -> Optional[QuicSendingPacketSpace]:
         loss_space = None
         for space in self.spaces:
             if space.loss_time is not None and (
@@ -408,7 +417,10 @@ class QuicPacketRecovery:
         )
 
     def _on_packets_lost(
-        self, packets: Iterable[QuicSentPacket], space: QuicPacketSpace, now: float
+        self,
+        packets: Iterable[QuicSentPacket],
+        space: QuicSendingPacketSpace,
+        now: float,
     ) -> None:
         lost_packets_cc = []
         for packet in packets:

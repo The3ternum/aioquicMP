@@ -161,7 +161,7 @@ def disable_packet_pacing(connection):
         def next_send_time(self, now):
             return None
 
-    connection._loss._pacer = DummyPacketPacer()
+    connection._sending_uniflows[0].loss._pacer = DummyPacketPacer()
 
 
 def encode_transport_parameters(parameters: QuicTransportParameters) -> bytes:
@@ -418,8 +418,12 @@ class QuicConnectionTest(TestCase):
         self.assertEqual(datagram_sizes(items), [1280, 1072])
         # 4 bytes added to 1068 for new transport param
         self.assertAlmostEqual(server.get_timer(), 0.45)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 2
+        )
         self.assertEqual(type(server.next_event()), events.ProtocolNegotiated)
         self.assertIsNone(server.next_event())
 
@@ -439,8 +443,12 @@ class QuicConnectionTest(TestCase):
         items = server.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [241])  # +12 on 229 for add_address
         self.assertAlmostEqual(server.get_timer(), 0.625)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 0)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 0
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 0
+        )
         self.assertEqual(type(server.next_event()), events.HandshakeCompleted)
         self.assertEqual(type(server.next_event()), events.ConnectionIdIssued)
 
@@ -493,8 +501,12 @@ class QuicConnectionTest(TestCase):
         self.assertEqual(datagram_sizes(items), [1280, 1072])
         # 4 bytes added to 1068 for new transport param
         self.assertEqual(server.get_timer(), 0.25)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 2
+        )
 
         # client only receives first datagram and sends ACKS
         now += TICK
@@ -518,8 +530,12 @@ class QuicConnectionTest(TestCase):
         items = server.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [48])
         self.assertAlmostEqual(server.get_timer(), 0.25)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 3)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 0
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 3
+        )
         self.assertEqual(type(server.next_event()), events.ProtocolNegotiated)
         self.assertIsNone(server.next_event())
 
@@ -530,8 +546,12 @@ class QuicConnectionTest(TestCase):
         self.assertEqual(datagram_sizes(items), [1280, 896])
         # 4 bytes added to 892 for new transport param
         self.assertAlmostEqual(server.get_timer(), 0.65)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 3)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 0
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 3
+        )
         self.assertIsNone(server.next_event())
 
         # handshake continues normally
@@ -601,8 +621,12 @@ class QuicConnectionTest(TestCase):
         self.assertEqual(datagram_sizes(items), [1280, 1072])
         # 4 bytes added to 1068 for new transport param
         self.assertEqual(server.get_timer(), 0.25)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 2
+        )
 
         # client receives INITIAL + HANDSHAKE
         now += TICK
@@ -621,8 +645,12 @@ class QuicConnectionTest(TestCase):
         items = server.datagrams_to_send(now=now)
         self.assertEqual(datagram_sizes(items), [241])  # +12 on 229 for add_address
         self.assertAlmostEqual(server.get_timer(), 0.425)
-        self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
-        self.assertEqual(len(server._loss.spaces[1].sent_packets), 0)
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 0
+        )
+        self.assertEqual(
+            len(server._sending_uniflows[0].loss.spaces[1].sent_packets), 0
+        )
         self.assertEqual(type(server.next_event()), events.ProtocolNegotiated)
         self.assertEqual(type(server.next_event()), events.HandshakeCompleted)
         self.assertEqual(type(server.next_event()), events.ConnectionIdIssued)
@@ -2036,9 +2064,9 @@ class QuicConnectionTest(TestCase):
     def test_send_max_data_blocked_by_cc(self):
         with client_and_server() as (client, server):
             # check congestion control
-            self.assertEqual(client._loss.bytes_in_flight, 0)
+            self.assertEqual(client._sending_uniflows[0].loss.bytes_in_flight, 0)
             self.assertEqual(
-                client._loss.congestion_window, 14315
+                client._sending_uniflows[0].loss.congestion_window, 14315
             )  # +12 on 14303 for add_address
 
             # artificially raise received data counter
@@ -2046,7 +2074,7 @@ class QuicConnectionTest(TestCase):
             self.assertEqual(server._remote_max_data, 1048576)
 
             # artificially raise bytes in flight
-            client._loss._cc.bytes_in_flight = 14303
+            client._sending_uniflows[0].loss._cc.bytes_in_flight = 14303
 
             # MAX_DATA is not sent due to congestion control
             self.assertEqual(drop(client), 0)

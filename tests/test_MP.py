@@ -101,7 +101,8 @@ def disable_packet_pacing(connection):
         def next_send_time(self, now):
             return None
 
-    connection._loss._pacer = DummyPacketPacer()
+    for suniflow in connection._sending_uniflows.values():
+        suniflow.loss._pacer = DummyPacketPacer()
 
 
 def sequence_numbers(connection_ids):
