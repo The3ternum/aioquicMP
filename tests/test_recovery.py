@@ -6,6 +6,7 @@ from aioquic.quic.packet import PACKET_TYPE_INITIAL, PACKET_TYPE_ONE_RTT
 from aioquic.quic.packet_builder import QuicSentPacket
 from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.recovery import (
+    CCTYPE,
     QuicPacketPacer,
     QuicPacketRecovery,
     QuicRttMonitor,
@@ -71,6 +72,7 @@ class QuicPacketRecoveryTest(TestCase):
             initial_rtt=0.1,
             peer_completed_address_validation=True,
             send_probe=send_probe,
+            cc_type=CCTYPE.NEW_RENO,
         )
         self.recovery.spaces = [
             self.INITIAL_SPACE,

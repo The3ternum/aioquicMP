@@ -1,4 +1,5 @@
 import math
+from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
 
 from .logger import QuicLoggerTrace
@@ -17,6 +18,11 @@ K_MAX_DATAGRAM_SIZE = 1280
 K_INITIAL_WINDOW = 10 * K_MAX_DATAGRAM_SIZE
 K_MINIMUM_WINDOW = 2 * K_MAX_DATAGRAM_SIZE
 K_LOSS_REDUCTION_FACTOR = 0.5
+
+
+class CCTYPE(Enum):
+    NEW_RENO = 0
+    DUMMY = 1
 
 
 class QuicReceivingPacketSpace:
@@ -148,6 +154,43 @@ class QuicCongestionControl:
             self.ssthresh = self.congestion_window
 
 
+class MPQuicDummyCongestionControl(QuicCongestionControl):
+    """
+    Dummy congestion control.
+    Keeps the congestion window and sshthresh the same.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def on_packet_acked(self, packet: QuicSentPacket) -> None:
+        self.bytes_in_flight -= packet.sent_bytes
+
+        # keep congestion window the same
+
+    def on_packet_sent(self, packet: QuicSentPacket) -> None:
+        super().on_packet_sent(packet)
+
+    def on_packets_expired(self, packets: Iterable[QuicSentPacket]) -> None:
+        super().on_packets_expired(packets)
+
+    def on_packets_lost(self, packets: Iterable[QuicSentPacket], now: float) -> None:
+        lost_largest_time = 0.0
+        for packet in packets:
+            self.bytes_in_flight -= packet.sent_bytes
+            lost_largest_time = packet.sent_time
+
+        # start a new congestion event if packet was sent after the
+        # start of the previous congestion recovery period.
+        if lost_largest_time > self._congestion_recovery_start_time:
+            self._congestion_recovery_start_time = now
+
+            # keep the congestion window the same
+
+    def on_rtt_measurement(self, latest_rtt: float, now: float) -> None:
+        return
+
+
 def discard_receiving_space(space: QuicReceivingPacketSpace) -> None:
     space.ack_at = None
 
@@ -162,6 +205,7 @@ class QuicPacketRecovery:
         initial_rtt: float,
         peer_completed_address_validation: bool,
         send_probe: Callable[[], None],
+        cc_type: CCTYPE,
         quic_logger: Optional[QuicLoggerTrace] = None,
     ) -> None:
         self.max_ack_delay = 0.025
@@ -183,7 +227,12 @@ class QuicPacketRecovery:
         self._time_of_last_sent_ack_eliciting_packet = 0.0
 
         # congestion control
-        self._cc = QuicCongestionControl()
+        if cc_type == CCTYPE.NEW_RENO:
+            self._cc = QuicCongestionControl()
+        elif cc_type == CCTYPE.DUMMY:
+            self._cc = MPQuicDummyCongestionControl()
+        else:  # default
+            self._cc = QuicCongestionControl()
         self._pacer = QuicPacketPacer()
 
     @property

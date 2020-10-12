@@ -18,6 +18,7 @@ from aioquic.h3.events import DataReceived, H3Event, HeadersReceived
 from aioquic.h3.exceptions import NoAvailablePushIDError
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import DatagramFrameReceived, ProtocolNegotiated, QuicEvent
+from aioquic.quic.recovery import CCTYPE
 from aioquic.tls import SessionTicket
 from examples.quic_logger import QuicDirectoryLogger
 
@@ -453,6 +454,7 @@ if __name__ == "__main__":
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
         max_sending_uniflow_id=max_sending_uniflows_id,
+        cc_type=CCTYPE.DUMMY,
     )
 
     # load SSL certificate and key

@@ -10,6 +10,7 @@ from ..tls import (
 )
 from .logger import QuicLogger
 from .packet import QuicProtocolVersion
+from .recovery import CCTYPE
 
 
 @dataclass
@@ -77,6 +78,11 @@ class QuicConfiguration:
     local_addresses: List = field(default_factory=list)
     """
     The available addresses of a host
+    """
+
+    cc_type: CCTYPE = CCTYPE.NEW_RENO
+    """
+    The congestion controller to be used
     """
 
     session_ticket: Optional[SessionTicket] = None

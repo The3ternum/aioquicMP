@@ -309,6 +309,7 @@ class QuicSendingUniflow:
         self.loss: QuicPacketRecovery = QuicPacketRecovery(
             initial_rtt=configuration.initial_rtt,
             peer_completed_address_validation=not configuration.is_client,
+            cc_type=configuration.cc_type,
             quic_logger=quic_logger,
             send_probe=self.send_probe,
         )

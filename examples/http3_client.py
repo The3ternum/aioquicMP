@@ -25,6 +25,7 @@ from aioquic.h3.events import (
 )
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent
+from aioquic.quic.recovery import CCTYPE
 from aioquic.tls import CipherSuite, SessionTicket
 from examples.quic_logger import QuicDirectoryLogger
 
@@ -511,6 +512,7 @@ if __name__ == "__main__":
         is_client=True,
         alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN,
         max_sending_uniflow_id=max_sending_uniflows_id,
+        cc_type=CCTYPE.DUMMY,
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)
