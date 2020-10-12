@@ -97,6 +97,7 @@ STREAMS_BLOCKED_CAPACITY = 1 + 8
 TRANSPORT_CLOSE_FRAME_CAPACITY = 1 + 8 + 8 + 8  # + reason length
 MP_NEW_CONNECTION_ID_FRAME_CAPACITY = 1 + 8 + 8 + 8 + 1 + 20 + 16
 MP_RETIRE_CONNECTION_ID_CAPACITY = 1 + 8 + 8
+MP_ACK_FRAME_CAPACITY = 72  # fixme: this is arbitrary!
 REMOVE_ADDRESS_CAPACITY = 1 + 1 + 8
 
 
@@ -433,8 +434,6 @@ class QuicConnection:
         self._local_max_streams_uni = Limit(
             frame_type=QuicFrameType.MAX_STREAMS_UNI, name="max_streams_uni", value=128
         )
-        # self._loss_at: Optional[float] = None
-        # self._pacing_at: Optional[float] = None
         self._parameters_received = False
         self._quic_logger: Optional[QuicLoggerTrace] = None
         self._remote_ack_delay_exponent = 3
@@ -450,12 +449,6 @@ class QuicConnection:
         self._remote_max_streams_uni = 0
         self._retry_count = 0
         self._retry_source_connection_id = retry_source_connection_id
-        # self._receiving_spaces: Dict[int, Dict[tls.Epoch, QuicReceivingPacketSpace]] = {
-        #     0: {}
-        # }
-        # self._sending_spaces: Dict[int, Dict[tls.Epoch, QuicSendingPacketSpace]] = {
-        #     0: {}
-        # }
         self._spin_bit = False
         self._spin_highest_pn = 0
         self._state = QuicConnectionState.FIRSTFLIGHT
@@ -506,20 +499,11 @@ class QuicConnection:
                 odcid=self._original_destination_connection_id,
             )
 
-        # loss recovery
-        # self._loss = QuicPacketRecovery(
-        #     initial_rtt=configuration.initial_rtt,
-        #     peer_completed_address_validation=not self._is_client,
-        #     quic_logger=self._quic_logger,
-        #     send_probe=self._send_probe,
-        # )
-
         # things to send
         self._close_pending = False
         self._datagrams_pending: Deque[bytes] = deque()
         self._handshake_done_pending = False
         self._ping_pending: List[int] = []
-        # self._probe_pending = False
         self._streams_blocked_pending = False
         self._removed_addresses: List[int] = []
         self._uniflows_pending = False
@@ -2355,7 +2339,6 @@ class QuicConnection:
         found_uniflow.local_challenge = None
         found_uniflow.path_challenge_at = None
         found_uniflow.path_is_validated = True
-        print("SEND Uniflow " + str(found_uniflow.uniflow_id) + " path is validated")
 
     def _handle_ping_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2812,7 +2795,38 @@ class QuicConnection:
                 )
             )
 
-        # Todo
+        # sanity checks
+        if uniflow_id not in self._sending_uniflows.keys():
+            raise QuicConnectionError(
+                error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                frame_type=frame_type,
+                reason_phrase="Uniflow " + str(uniflow_id) + " does not exist",
+            )
+
+        if uniflow_id == 0:
+            raise QuicConnectionError(
+                error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                frame_type=frame_type,
+                reason_phrase="Uniflow "
+                + str(uniflow_id)
+                + " id not allowed for this frame type",
+            )
+
+        suniflow = self._sending_uniflows[uniflow_id]
+        # todo: don't check for peer completed address validation --> path response should do this
+        # check whether peer completed address validation
+        # if not suniflow.loss.peer_completed_address_validation and context.epoch in (
+        #         tls.Epoch.HANDSHAKE,
+        #         tls.Epoch.ONE_RTT,
+        # ):
+        #     suniflow.loss.peer_completed_address_validation = True
+
+        suniflow.loss.on_ack_received(
+            space=suniflow.sending_spaces[context.epoch],
+            ack_rangeset=ack_rangeset,
+            ack_delay=ack_delay,
+            now=context.time,
+        )
 
     def _handle_add_address_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -3007,7 +3021,10 @@ class QuicConnection:
                     specified_address.port = perceived_address.port
                     specified_uniflow.source_address = specified_address
                     for i in range(len(specified_uniflow.perceived_remote_addresses)):
-                        if specified_uniflow.perceived_remote_addresses[i] is perceived_address:
+                        if (
+                            specified_uniflow.perceived_remote_addresses[i]
+                            is perceived_address
+                        ):
                             specified_uniflow.perceived_remote_addresses[i] = specified_address
 
                     # update all other receiving uniflows that use this address
@@ -3015,7 +3032,10 @@ class QuicConnection:
                         if runiflow.source_address is perceived_address:
                             runiflow.source_address = specified_address
                         for i in range(len(runiflow.perceived_remote_addresses)):
-                            if runiflow.perceived_remote_addresses[i] is perceived_address:
+                            if (
+                                runiflow.perceived_remote_addresses[i]
+                                is perceived_address
+                            ):
                                 runiflow.perceived_remote_addresses[i] = specified_address
 
                     # sending uniflow destination addresses are based on the remote addresses
@@ -3029,8 +3049,13 @@ class QuicConnection:
                 else:
                     # not same address
                     specified_uniflow.source_address = specified_address
-                    if specified_address not in specified_uniflow.perceived_remote_addresses:
-                        specified_uniflow.perceived_remote_addresses.insert(0, specified_address)
+                    if (
+                        specified_address
+                        not in specified_uniflow.perceived_remote_addresses
+                    ):
+                        specified_uniflow.perceived_remote_addresses.insert(
+                            0, specified_address
+                        )
 
     def _log_key_retired(self, key_type: str, trigger: str) -> None:
         """
@@ -4212,6 +4237,40 @@ class QuicConnection:
                     uniflow_id=uniflow_id, sequence_number=sequence_number
                 )
             )
+
+    def _write_mp_ack_frame(
+        self,
+        builder: QuicPacketBuilder,
+        space: QuicReceivingPacketSpace,
+        now: float,
+        uniflow_id: int,
+    ) -> None:
+        # calculate ACK delay
+        ack_delay = now - space.largest_received_time
+        ack_delay_encoded = int(ack_delay * 1000000) >> self._local_ack_delay_exponent
+
+        buf = builder.start_frame(
+            QuicFrameType.ACK,
+            capacity=ACK_FRAME_CAPACITY,
+            handler=self._on_ack_delivery,
+            handler_args=(space, space.largest_received_packet),
+        )
+
+        buf.push_uint_var(uniflow_id)
+        ranges = push_ack_frame(buf, space.ack_queue, ack_delay_encoded)
+        space.ack_at = None
+
+        # log frame
+        if self._quic_logger is not None:
+            builder.quic_logger_frames.append(
+                self._quic_logger.encode_mp_ack_frame(
+                    uniflow_id=uniflow_id, ranges=space.ack_queue, delay=ack_delay
+                )
+            )
+
+        # check if we need to trigger an ACK-of-ACK
+        if ranges > 1 and builder.packet_number % 8 == 0:
+            self._write_ping_frame(builder, comment="ACK-of-ACK trigger")
 
     def _write_add_address_frame(
         self, builder: QuicPacketBuilder, address: EndpointAddress
