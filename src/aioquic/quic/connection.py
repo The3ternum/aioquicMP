@@ -1303,11 +1303,13 @@ class QuicConnection:
             # Todo: handle section 9.5
             if srecvuniflow.source_address != perceived_remote_address:
                 if srecvuniflow.source_address is None:
-                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new source address")
+                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new source address")
                     srecvuniflow.source_address = perceived_remote_address
                 else:
-                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected source address change")
-                    idx = srecvuniflow.perceived_remote_addresses.index(perceived_remote_address)
+                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected source address change")
+                    idx = srecvuniflow.perceived_remote_addresses.index(
+                        perceived_remote_address
+                    )
                     if (
                         idx
                         and not is_probing
@@ -1318,18 +1320,21 @@ class QuicConnection:
                             (dump_address(perceived_remote_address)),
                         )
                         srecvuniflow.perceived_remote_addresses.pop(idx)
-                        srecvuniflow.perceived_remote_addresses.insert(0, perceived_remote_address)
+                        srecvuniflow.perceived_remote_addresses.insert(
+                            0, perceived_remote_address
+                        )
                         srecvuniflow.source_address = perceived_remote_address
                         if srecvuniflow.uniflow_id == 0:
-                            self._sending_uniflows[0].destination_address = perceived_remote_address
-                            self._sending_uniflows[0].path_is_validated = False
+                            isenduniflow = self._sending_uniflows[0]
+                            isenduniflow.destination_address = perceived_remote_address
+                            isenduniflow.path_is_validated = False
 
             if srecvuniflow.destination_address != perceived_local_address:
                 if srecvuniflow.destination_address is None:
-                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new destination address")
+                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected new destination address")
                     pass
                 else:
-                    print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected destination address change")
+                    # print("RECEIVE Uniflow " + str(srecvuniflow.uniflow_id) + " detected destination address change")
                     pass
                 srecvuniflow.destination_address = perceived_local_address
 
@@ -3014,7 +3019,9 @@ class QuicConnection:
                 if perceived_address is None:
                     # receiving uniflow doesn't have a source address yet
                     specified_uniflow.source_address = specified_address
-                    specified_uniflow.perceived_remote_addresses.append(specified_address)
+                    specified_uniflow.perceived_remote_addresses.append(
+                        specified_address
+                    )
                 elif perceived_address.address_id is None:
                     # link the perceived address to the communicated address
                     specified_address.ip_address = perceived_address.ip_address
@@ -3025,7 +3032,8 @@ class QuicConnection:
                             specified_uniflow.perceived_remote_addresses[i]
                             is perceived_address
                         ):
-                            specified_uniflow.perceived_remote_addresses[i] = specified_address
+                            su_pra = specified_uniflow.perceived_remote_addresses
+                            su_pra[i] = specified_address
 
                     # update all other receiving uniflows that use this address
                     for runiflow in self._receiving_uniflows.values():
@@ -3036,7 +3044,8 @@ class QuicConnection:
                                 runiflow.perceived_remote_addresses[i]
                                 is perceived_address
                             ):
-                                runiflow.perceived_remote_addresses[i] = specified_address
+                                ru_pra = runiflow.perceived_remote_addresses
+                                ru_pra[i] = specified_address
 
                     # sending uniflow destination addresses are based on the remote addresses
                     # thus, the address is updated automatically
@@ -3169,6 +3178,18 @@ class QuicConnection:
             self._sending_uniflows[uniflow_id].retire_connection_ids.append(
                 sequence_number
             )
+
+    def _on_mp_ack_delivery(
+        self,
+        delivery: QuicDeliveryState,
+        space: QuicReceivingPacketSpace,
+        highest_acked: int,
+    ) -> None:
+        """
+        Callback when an MP_ACK frame is acknowledged or lost.
+        """
+        if delivery == QuicDeliveryState.ACKED:
+            space.ack_queue.subtract(0, highest_acked + 1)
 
     def _on_add_address_delivery(
         self, delivery: QuicDeliveryState, address_id: int
@@ -4250,9 +4271,9 @@ class QuicConnection:
         ack_delay_encoded = int(ack_delay * 1000000) >> self._local_ack_delay_exponent
 
         buf = builder.start_frame(
-            QuicFrameType.ACK,
-            capacity=ACK_FRAME_CAPACITY,
-            handler=self._on_ack_delivery,
+            QuicFrameType.MP_ACK,
+            capacity=MP_ACK_FRAME_CAPACITY,
+            handler=self._on_mp_ack_delivery,
             handler_args=(space, space.largest_received_packet),
         )
 
