@@ -66,15 +66,15 @@ MAX_EARLY_DATA = 0xFFFFFFFF
 SECRETS_LABELS = [
     [
         None,
-        "QUIC_CLIENT_EARLY_TRAFFIC_SECRET",
-        "QUIC_CLIENT_HANDSHAKE_TRAFFIC_SECRET",
-        "QUIC_CLIENT_TRAFFIC_SECRET_0",
+        "CLIENT_EARLY_TRAFFIC_SECRET",
+        "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+        "CLIENT_TRAFFIC_SECRET_0",
     ],
     [
         None,
         None,
-        "QUIC_SERVER_HANDSHAKE_TRAFFIC_SECRET",
-        "QUIC_SERVER_TRAFFIC_SECRET_0",
+        "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+        "SERVER_TRAFFIC_SECRET_0",
     ],
 ]
 STREAM_FLAGS = 0x07
@@ -348,7 +348,7 @@ class QuicConnection:
     The state machine is driven by three kinds of sources:
 
     - the API user requesting data to be send out (see :meth:`connect`,
-      :meth:`reset_stream`, :meth:`send_ping`, :meth:`send_datagram_data`
+      :meth:`reset_stream`, :meth:`send_ping`, :meth:`send_datagram_frame`
       and :meth:`send_stream_data`)
     - data being received from the network (see :meth:`receive_datagram`)
     - a timer firing (see :meth:`handle_timer`)
