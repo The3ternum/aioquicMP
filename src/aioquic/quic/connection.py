@@ -723,7 +723,7 @@ class QuicConnection:
         :param now: The current time.
         """
 
-        ret = []
+        ret: List[Tuple[bytes, NetworkAddress, NetworkAddress]] = []
 
         if self._state in END_STATES:
             return ret
@@ -870,8 +870,7 @@ class QuicConnection:
 
                 # congestion control
                 builder.max_flight_bytes = (
-                    auniflow.loss.congestion_window
-                    - auniflow.loss.bytes_in_flight
+                    auniflow.loss.congestion_window - auniflow.loss.bytes_in_flight
                 )
                 if (
                     auniflow.probe_pending
@@ -880,12 +879,10 @@ class QuicConnection:
                     builder.max_flight_bytes = PACKET_MAX_SIZE
 
                 # limit data on un-validated network paths
-                if (
-                    auniflow.uniflow_id == 0
-                    and not auniflow.path_is_validated
-                ):
+                if auniflow.uniflow_id == 0 and not auniflow.path_is_validated:
                     builder.max_total_bytes = (
-                        auniflow.destination_address.bytes_received * 3 - auniflow.destination_address.bytes_sent
+                        auniflow.destination_address.bytes_received * 3
+                        - auniflow.destination_address.bytes_sent
                     )
 
                 builders[auniflow.uniflow_id] = builder
@@ -914,7 +911,12 @@ class QuicConnection:
                 ret.extend(self._couple_datagrams_to_address(datagrams, auniflow))
         return ret
 
-    def _register_packets(self, packets: List[QuicSentPacket], selected_uniflow: QuicSendingUniflow, now: float):
+    def _register_packets(
+        self,
+        packets: List[QuicSentPacket],
+        selected_uniflow: QuicSendingUniflow,
+        now: float,
+    ) -> None:
         sent_handshake = False
         for packet in packets:
             packet.sent_time = now
@@ -948,7 +950,9 @@ class QuicConnection:
         if sent_handshake and self._is_client and selected_uniflow.uniflow_id == 0:
             self._discard_epoch(tls.Epoch.INITIAL)
 
-    def _couple_datagrams_to_address(self, datagrams: List[bytes], selected_uniflow: QuicSendingUniflow):
+    def _couple_datagrams_to_address(
+        self, datagrams: List[bytes], selected_uniflow: QuicSendingUniflow
+    ) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
         ret = []
         for datagram in datagrams:
             byte_length = len(datagram)
