@@ -43,6 +43,7 @@ from .packet_builder import (
     QuicDeliveryState,
     QuicPacketBuilder,
     QuicPacketBuilderStop,
+    QuicSentPacket,
 )
 from .recovery import (
     K_GRANULARITY,
@@ -722,28 +723,40 @@ class QuicConnection:
         :param now: The current time.
         """
 
+        ret = []
+
         if self._state in END_STATES:
-            return []
+            return ret
 
-        # bind unused uniflows to addresses and send path challenges
-        sending_uniflows_list = self._bind_unused_uniflows(now)
+        # split the uniflows in active ones and unused, unbound ones
+        active_uniflows = []
+        unused_uniflows = []
+        for suniflow in self._sending_uniflows.values():
+            if suniflow.state == UniflowState.ACTIVE:
+                active_uniflows.append(suniflow)
+            elif (
+                suniflow.state == UniflowState.UNUSED
+                and suniflow.source_address is None
+                and suniflow.destination_address is None
+                and len(suniflow.cid_available) > 0
+            ):
+                unused_uniflows.append(suniflow)
 
-        # TODO packet scheduling
-        selected_uniflow = self._sending_uniflows[0]
-        network_path = selected_uniflow.destination_address
-
-        # build datagrams
-        builder = QuicPacketBuilder(
-            host_cid=self._receiving_uniflows[0].cid,
-            is_client=self._is_client,
-            packet_number=selected_uniflow.packet_number,
-            peer_cid=selected_uniflow.cid.cid,
-            peer_token=selected_uniflow.token,
-            quic_logger=self._quic_logger,
-            spin_bit=self._spin_bit,
-            version=self._version,
-        )
+        # handle closing
         if self._close_pending:
+            selected_uniflow = random.choice(active_uniflows)
+            builder = QuicPacketBuilder(
+                host_cid=self._receiving_uniflows[0].cid,
+                is_client=self._is_client,
+                packet_number=selected_uniflow.packet_number,
+                peer_cid=selected_uniflow.cid.cid,
+                peer_token=selected_uniflow.token,
+                quic_logger=self._quic_logger,
+                spin_bit=self._spin_bit,
+                version=self._version,
+            )
+
+            # write connection close for valid epoch
             for epoch, packet_type in (
                 (tls.Epoch.ONE_RTT, PACKET_TYPE_ONE_RTT),
                 (tls.Epoch.HANDSHAKE, PACKET_TYPE_HANDSHAKE),
@@ -762,91 +775,200 @@ class QuicConnection:
                     self._close_pending = False
                     break
             self._close_begin(is_initiator=True, now=now)
-        else:
-            # congestion control
-            builder.max_flight_bytes = (
-                selected_uniflow.loss.congestion_window
-                - selected_uniflow.loss.bytes_in_flight
-            )
-            if (
-                selected_uniflow.probe_pending
-                and builder.max_flight_bytes < PACKET_MAX_SIZE
-            ):
-                builder.max_flight_bytes = PACKET_MAX_SIZE
+            datagrams, packets = builder.flush()
 
-            # limit data on un-validated network paths
+            if datagrams:
+                selected_uniflow.packet_number = builder.packet_number
+
+                # register packets
+                self._register_packets(packets, selected_uniflow, now)
+
+            # return datagrams to send and the destination network address
+            ret.extend(self._couple_datagrams_to_address(datagrams, selected_uniflow))
+
+        else:  # handle normal communication
+            # bind unused uniflows to addresses
             if (
-                selected_uniflow.uniflow_id == 0
-                and not selected_uniflow.path_is_validated
+                self._state == QuicConnectionState.CONNECTED
+                and len(self._remote_addresses.keys()) > 1
             ):
-                builder.max_total_bytes = (
-                    network_path.bytes_received * 3 - network_path.bytes_sent
+                for uuniflow in unused_uniflows:
+                    # set random source/destination addresses
+                    rsaid = random.choice(list(self._local_addresses.keys()))
+                    source_address = self._local_addresses[rsaid]
+                    rdaid = random.choice(list(self._remote_addresses.keys()))
+                    destination_address = self._remote_addresses[rdaid]
+
+                    uuniflow.source_address = source_address
+                    uuniflow.destination_address = destination_address
+
+                    print(
+                        "set sending uniflow "
+                        + str(uuniflow.uniflow_id)
+                        + " source address: ",
+                        (dump_address(uuniflow.source_address)),
+                        "\nset sending uniflow "
+                        + str(uuniflow.uniflow_id)
+                        + " destination address: ",
+                        (dump_address(uuniflow.destination_address)),
+                    )
+
+                    builder = QuicPacketBuilder(
+                        host_cid=self._receiving_uniflows[0].cid,
+                        is_client=self._is_client,
+                        packet_number=uuniflow.packet_number,
+                        peer_cid=uuniflow.cid.cid,
+                        peer_token=uuniflow.token,
+                        quic_logger=self._quic_logger,
+                        spin_bit=self._spin_bit,
+                        version=self._version,
+                    )
+
+                    # write path challenge frame
+                    try:
+                        crypto = self._cryptos[tls.Epoch.ONE_RTT]
+                        packet_type = PACKET_TYPE_ONE_RTT
+
+                        builder.start_packet(packet_type, crypto)
+                        uuniflow.local_challenge = os.urandom(8)
+                        self._write_path_challenge_frame(
+                            builder=builder,
+                            challenge=uuniflow.local_challenge,
+                            uniflow_id=uuniflow.uniflow_id,
+                        )
+                    except QuicPacketBuilderStop:
+                        pass
+
+                    datagrams, packets = builder.flush()
+
+                    if datagrams:
+                        uuniflow.packet_number = builder.packet_number
+
+                        # register packets
+                        self._register_packets(packets, uuniflow, now)
+
+                    # return datagrams to send and the destination network address
+                    ret_unused = self._couple_datagrams_to_address(datagrams, uuniflow)
+                    if len(ret_unused) > 0:
+                        self._uniflows_seq += 1
+                        self._uniflows_pending = True
+                    ret.extend(ret_unused)
+
+            # use active sending uniflows
+            builders: Dict[int, QuicPacketBuilder] = {}
+            for auniflow in active_uniflows:
+                builder = QuicPacketBuilder(
+                    host_cid=self._receiving_uniflows[0].cid,
+                    is_client=self._is_client,
+                    packet_number=auniflow.packet_number,
+                    peer_cid=auniflow.cid.cid,
+                    peer_token=auniflow.token,
+                    quic_logger=self._quic_logger,
+                    spin_bit=self._spin_bit,
+                    version=self._version,
                 )
+
+                # congestion control
+                builder.max_flight_bytes = (
+                    auniflow.loss.congestion_window
+                    - auniflow.loss.bytes_in_flight
+                )
+                if (
+                    auniflow.probe_pending
+                    and builder.max_flight_bytes < PACKET_MAX_SIZE
+                ):
+                    builder.max_flight_bytes = PACKET_MAX_SIZE
+
+                # limit data on un-validated network paths
+                if (
+                    auniflow.uniflow_id == 0
+                    and not auniflow.path_is_validated
+                ):
+                    builder.max_total_bytes = (
+                        auniflow.destination_address.bytes_received * 3 - auniflow.destination_address.bytes_sent
+                    )
+
+                builders[auniflow.uniflow_id] = builder
 
             try:
                 if not self._handshake_confirmed:
                     for epoch in [tls.Epoch.INITIAL, tls.Epoch.HANDSHAKE]:
-                        self._write_handshake(builder, epoch, now)
-                self._write_application(builder, selected_uniflow, now)
+                        self._write_handshake(builders[0], epoch, now)
+                self._write_application(builders, now)
             except QuicPacketBuilderStop:
                 pass
 
-        datagrams, packets = builder.flush()
+            # flush all builders
+            for uniflow_id, builder in builders.items():
+                auniflow = self._sending_uniflows[uniflow_id]
 
-        if datagrams:
-            selected_uniflow.packet_number = builder.packet_number
+                datagrams, packets = builder.flush()
 
-            # register packets
-            sent_handshake = False
-            for packet in packets:
-                packet.sent_time = now
-                space = selected_uniflow.sending_spaces[packet.epoch]
-                selected_uniflow.loss.on_packet_sent(packet=packet, space=space)
-                if packet.epoch == tls.Epoch.HANDSHAKE:
-                    sent_handshake = True
+                if datagrams:
+                    auniflow.packet_number = builder.packet_number
 
-                # log packet
-                if self._quic_logger is not None:
-                    self._quic_logger.log_event(
-                        category="transport",
-                        event="packet_sent",
-                        data={
-                            "packet_type": self._quic_logger.packet_type(
-                                packet.packet_type
-                            ),
-                            "header": {
-                                "packet_number": str(packet.packet_number),
-                                "packet_size": packet.sent_bytes,
-                                "scid": dump_cid(self._receiving_uniflows[0].cid)
-                                if is_long_header(packet.packet_type)
-                                else "",
-                                "dcid": dump_cid(selected_uniflow.cid.cid),
-                            },
-                            "frames": packet.quic_logger_frames,
+                    # register packets
+                    self._register_packets(packets, auniflow, now)
+
+                # return datagrams to send and the destination network address
+                ret.extend(self._couple_datagrams_to_address(datagrams, auniflow))
+        return ret
+
+    def _register_packets(self, packets: List[QuicSentPacket], selected_uniflow: QuicSendingUniflow, now: float):
+        sent_handshake = False
+        for packet in packets:
+            packet.sent_time = now
+            space = selected_uniflow.sending_spaces[packet.epoch]
+            selected_uniflow.loss.on_packet_sent(packet=packet, space=space)
+            if packet.epoch == tls.Epoch.HANDSHAKE:
+                sent_handshake = True
+
+            # log packet
+            if self._quic_logger is not None:
+                self._quic_logger.log_event(
+                    category="transport",
+                    event="packet_sent",
+                    data={
+                        "packet_type": self._quic_logger.packet_type(
+                            packet.packet_type
+                        ),
+                        "header": {
+                            "packet_number": str(packet.packet_number),
+                            "packet_size": packet.sent_bytes,
+                            "scid": dump_cid(self._receiving_uniflows[0].cid)
+                            if is_long_header(packet.packet_type)
+                            else "",
+                            "dcid": dump_cid(selected_uniflow.cid.cid),
                         },
-                    )
+                        "frames": packet.quic_logger_frames,
+                    },
+                )
 
-            # check if we can discard initial keys
-            if sent_handshake and self._is_client:
-                self._discard_epoch(tls.Epoch.INITIAL)
+        # check if we can discard initial keys
+        if sent_handshake and self._is_client and selected_uniflow.uniflow_id == 0:
+            self._discard_epoch(tls.Epoch.INITIAL)
 
-        # return datagrams to send and the destination network address
-        ret = sending_uniflows_list
+    def _couple_datagrams_to_address(self, datagrams: List[bytes], selected_uniflow: QuicSendingUniflow):
+        ret = []
         for datagram in datagrams:
             byte_length = len(datagram)
+            network_path = selected_uniflow.destination_address
             network_path.bytes_sent += byte_length
 
             ret.append(
                 (
                     datagram,
-                    (network_path.ip_address, network_path.port),
+                    (
+                        selected_uniflow.destination_address.ip_address,
+                        selected_uniflow.destination_address.port,
+                    ),
                     (
                         selected_uniflow.source_address.ip_address,
                         selected_uniflow.source_address.port,
                     ),
                 )
             )
-            # print("sending from", ret[-1][2], "to", ret[-1][1])
+            # print("sending on uniflow ", selected_uniflow.uniflow_id, "from", ret[-1][2], "to", ret[-1][1])
 
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
@@ -1471,126 +1593,6 @@ class QuicConnection:
                 suniflow.sending_spaces[epoch].discarded = True
 
         self._cryptos[epoch].teardown()
-
-    def _bind_unused_uniflows(
-        self, now: float
-    ) -> List[Tuple[bytes, NetworkAddress, NetworkAddress]]:
-        ret = []
-        # fixme: change the behaviour of starting to use new sending uniflows
-        if (
-            self._state == QuicConnectionState.CONNECTED
-            and len(self._remote_addresses.keys()) > 1
-        ):
-            for suniflow in self._sending_uniflows.values():
-                if (
-                    suniflow.state == UniflowState.UNUSED
-                    and suniflow.source_address is None
-                    and suniflow.destination_address is None
-                    and len(suniflow.cid_available) > 0
-                ):
-                    rsaid = random.choice(list(self._local_addresses.keys()))
-                    source_address = self._local_addresses[rsaid]
-                    rdaid = random.choice(list(self._remote_addresses.keys()))
-                    destination_address = self._remote_addresses[rdaid]
-                    suniflow.source_address = source_address
-                    suniflow.destination_address = destination_address
-                    suniflow.local_challenge = os.urandom(8)
-
-                    print(
-                        "set sending uniflow "
-                        + str(suniflow.uniflow_id)
-                        + " source address: ",
-                        (dump_address(suniflow.source_address)),
-                        "\nset sending uniflow "
-                        + str(suniflow.uniflow_id)
-                        + " destination address: ",
-                        (dump_address(suniflow.destination_address)),
-                    )
-
-                    builder = QuicPacketBuilder(
-                        host_cid=self._receiving_uniflows[0].cid,
-                        is_client=self._is_client,
-                        packet_number=suniflow.packet_number,
-                        peer_cid=suniflow.cid.cid,
-                        peer_token=suniflow.token,
-                        quic_logger=self._quic_logger,
-                        spin_bit=self._spin_bit,
-                        version=self._version,
-                    )
-
-                    try:
-                        crypto = self._cryptos[tls.Epoch.ONE_RTT]
-                        packet_type = PACKET_TYPE_ONE_RTT
-
-                        builder.start_packet(packet_type, crypto)
-
-                        self._write_path_challenge_frame(
-                            builder=builder,
-                            challenge=suniflow.local_challenge,
-                            uniflow_id=suniflow.uniflow_id,
-                        )
-
-                    except QuicPacketBuilderStop:
-                        pass
-
-                    datagrams, packets = builder.flush()
-
-                    if datagrams:
-                        suniflow.packet_number = builder.packet_number
-
-                        for packet in packets:
-                            # log packet
-                            if self._quic_logger is not None:
-                                self._quic_logger.log_event(
-                                    category="transport",
-                                    event="packet_sent",
-                                    data={
-                                        "packet_type": self._quic_logger.packet_type(
-                                            packet.packet_type
-                                        ),
-                                        "header": {
-                                            "packet_number": str(packet.packet_number),
-                                            "packet_size": packet.sent_bytes,
-                                            "scid": dump_cid(
-                                                self._receiving_uniflows[0].cid
-                                            )
-                                            if is_long_header(packet.packet_type)
-                                            else "",
-                                            "dcid": dump_cid(suniflow.cid.cid),
-                                        },
-                                        "frames": packet.quic_logger_frames,
-                                    },
-                                )
-
-                    for datagram in datagrams:
-                        byte_length = len(datagram)
-                        suniflow.destination_address.bytes_sent += byte_length
-
-                        ret.append(
-                            (
-                                datagram,
-                                (
-                                    suniflow.destination_address.ip_address,
-                                    suniflow.destination_address.port,
-                                ),
-                                (
-                                    suniflow.source_address.ip_address,
-                                    suniflow.source_address.port,
-                                ),
-                            )
-                        )
-
-                        if self._quic_logger is not None:
-                            self._quic_logger.log_event(
-                                category="transport",
-                                event="datagrams_sent",
-                                data={"byte_length": byte_length, "count": 1},
-                            )
-
-        if len(ret) > 0:
-            self._uniflows_seq += 1
-            self._uniflows_pending = True
-        return ret
 
     def _set_initial_address(self, address: EndpointAddress):
         swap_address_id = address.address_id
@@ -3545,8 +3547,7 @@ class QuicConnection:
 
     def _write_application(
         self,
-        builder: QuicPacketBuilder,
-        selected_uniflow: QuicSendingUniflow,
+        builders: Dict[int, QuicPacketBuilder],
         now: float,
     ) -> None:
         crypto_stream: Optional[QuicStream] = None
@@ -3559,8 +3560,10 @@ class QuicConnection:
             packet_type = PACKET_TYPE_ZERO_RTT
         else:
             return
-        # Todo change this to select the correct uniflow
+        # Todo: change this to handle all other uniflows
         space = self._receiving_uniflows[0].receiving_spaces[tls.Epoch.ONE_RTT]
+        selected_uniflow = self._sending_uniflows[list(builders.keys())[0]]
+        builder = builders[selected_uniflow.uniflow_id]
 
         while True:
             # apply pacing, except if we have ACKs to send
@@ -3640,6 +3643,17 @@ class QuicConnection:
                                     builder=builder,
                                     sequence_number=sequence_number,
                                     uniflow_id=suniflow.uniflow_id,
+                                )
+                    # MP_ACK
+                    for runiflow in self._receiving_uniflows.values():
+                        if runiflow.uniflow_id != 0:
+                            mpspace = runiflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                            if mpspace.ack_at is not None and mpspace.ack_at <= now:
+                                self._write_mp_ack_frame(
+                                    builder=builder,
+                                    space=mpspace,
+                                    now=now,
+                                    uniflow_id=runiflow.uniflow_id,
                                 )
 
                     # ADD_ADDRESS
