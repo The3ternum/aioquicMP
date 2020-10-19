@@ -298,7 +298,6 @@ class QuicSendingUniflow:
 
         self.path_is_validated: bool = False
         self.local_challenge: Optional[bytes] = None
-        self.path_challenge_at: Optional[float] = None
 
         self.probe_pending = False
         self.loss_at: Optional[float] = None
@@ -324,7 +323,6 @@ class QuicSendingUniflow:
         self.destination_address = None
         self.path_is_validated = False
         self.local_challenge = None
-        self.path_challenge_at = None
         self.probe_pending = False
         self.loss_at = None
         self.pacing_at = None
@@ -889,15 +887,6 @@ class QuicConnection:
                 if suniflow.pacing_at is not None and suniflow.pacing_at < timer_at:
                     timer_at = suniflow.pacing_at
 
-            # path challenge timer
-            # todo: change this to detect with loss
-            for suniflow in self._sending_uniflows.values():
-                if (
-                    suniflow.path_challenge_at is not None
-                    and suniflow.path_challenge_at < timer_at
-                ):
-                    timer_at = suniflow.path_challenge_at
-
         return timer_at
 
     def handle_timer(self, now: float) -> None:
@@ -927,16 +916,6 @@ class QuicConnection:
                     "uniflow " + str(suniflow.uniflow_id) + " Loss detection triggered"
                 )
                 suniflow.loss.on_loss_detection_timeout(now=now)
-
-        # path validation failed
-        for suniflow in self._sending_uniflows.values():
-            if (
-                suniflow.path_challenge_at is not None
-                and now >= suniflow.path_challenge_at
-            ):
-                suniflow.reset()
-                self.change_connection_id(suniflow.uniflow_id)
-                print("Uniflow " + str(suniflow.uniflow_id) + "path challenge timeout")
 
     def next_event(self) -> Optional[events.QuicEvent]:
         """
@@ -1546,7 +1525,9 @@ class QuicConnection:
                         builder.start_packet(packet_type, crypto)
 
                         self._write_path_challenge_frame(
-                            builder=builder, challenge=suniflow.local_challenge
+                            builder=builder,
+                            challenge=suniflow.local_challenge,
+                            uniflow_id=suniflow.uniflow_id,
                         )
 
                     except QuicPacketBuilderStop:
@@ -1605,9 +1586,7 @@ class QuicConnection:
                                 event="datagrams_sent",
                                 data={"byte_length": byte_length, "count": 1},
                             )
-                suniflow.path_challenge_at = now + max(
-                    3 * suniflow.loss._pto_count, 6 * self._configuration.initial_rtt
-                )
+
         if len(ret) > 0:
             self._uniflows_seq += 1
             self._uniflows_pending = True
@@ -2342,7 +2321,6 @@ class QuicConnection:
         )
 
         found_uniflow.local_challenge = None
-        found_uniflow.path_challenge_at = None
         found_uniflow.path_is_validated = True
 
     def _handle_ping_frame(
@@ -3134,6 +3112,16 @@ class QuicConnection:
         if delivery != QuicDeliveryState.ACKED:
             connection_id.was_sent = False
 
+    def _on_path_challenge_delivery(
+        self, delivery: QuicDeliveryState, challenge: bytes, uniflow_id: int
+    ):
+        if delivery != QuicDeliveryState.ACKED:
+            suniflow = self._sending_uniflows[uniflow_id]
+            if suniflow.local_challenge == challenge:
+                suniflow.reset()
+                self.change_connection_id(suniflow.uniflow_id)
+                print("Uniflow " + str(suniflow.uniflow_id) + "path challenge timeout")
+
     def _on_ping_delivery(
         self, delivery: QuicDeliveryState, uids: Sequence[int]
     ) -> None:
@@ -3604,7 +3592,7 @@ class QuicConnection:
                     ):
                         challenge = os.urandom(8)
                         self._write_path_challenge_frame(
-                            builder=builder, challenge=challenge
+                            builder=builder, challenge=challenge, uniflow_id=0
                         )
                         selected_uniflow.local_challenge = challenge
 
@@ -3998,10 +3986,13 @@ class QuicConnection:
             )
 
     def _write_path_challenge_frame(
-        self, builder: QuicPacketBuilder, challenge: bytes
+        self, builder: QuicPacketBuilder, challenge: bytes, uniflow_id: int
     ) -> None:
         buf = builder.start_frame(
-            QuicFrameType.PATH_CHALLENGE, capacity=PATH_CHALLENGE_FRAME_CAPACITY
+            QuicFrameType.PATH_CHALLENGE,
+            capacity=PATH_CHALLENGE_FRAME_CAPACITY,
+            handler=self._on_path_challenge_delivery,
+            handler_args=(challenge, uniflow_id),
         )
         buf.push_bytes(challenge)
 
