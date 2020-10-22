@@ -279,6 +279,7 @@ class QuicSendingUniflow:
         configuration: QuicConfiguration,
         quic_logger: Optional[QuicLoggerTrace] = None,
     ) -> None:
+        self.configuration: QuicConfiguration = configuration
         self.uniflow_id: int = uniflow_id
         self.cid: QuicConnectionId = QuicConnectionId(
             cid=os.urandom(configuration.connection_id_length),
@@ -307,9 +308,13 @@ class QuicSendingUniflow:
         # Congestion controller
         # Performance metrics
         self.sending_spaces: Dict[tls.Epoch, QuicSendingPacketSpace] = {}
+        self._quic_logger: Optional[QuicLoggerTrace] = quic_logger
         self.loss: QuicPacketRecovery = QuicPacketRecovery(
             initial_rtt=configuration.initial_rtt,
-            peer_completed_address_validation=not configuration.is_client,
+            # peer completed address validation is only applicable on uniflow 0, the other uniflows are not symmetrical
+            peer_completed_address_validation=not configuration.is_client
+            if is_first
+            else True,
             cc_type=configuration.cc_type,
             quic_logger=quic_logger,
             send_probe=self.send_probe,
@@ -328,6 +333,14 @@ class QuicSendingUniflow:
         self.loss_at = None
         self.pacing_at = None
         # reset congestion controller and performance metrics
+        self.loss = QuicPacketRecovery(
+            initial_rtt=self.configuration.initial_rtt,
+            peer_completed_address_validation=not self.configuration.is_client,
+            cc_type=self.configuration.cc_type,
+            quic_logger=self._quic_logger,
+            send_probe=self.send_probe,
+        )
+        self.loss.spaces = list(self.sending_spaces.values())
 
 
 @dataclass
@@ -467,6 +480,8 @@ class QuicConnection:
         self._max_sending_uniflows_id = configuration.max_sending_uniflow_id
         self._peer_mp_support = False
         self._peer_max_sending_uniflows_id = 0
+
+        self._builder_manager = BuilderManager()
 
         self._local_addresses: Dict[int, EndpointAddress] = {}
         # Copy the addresses shared in the configuration
@@ -802,7 +817,7 @@ class QuicConnection:
                     uuniflow.source_address = source_address
                     uuniflow.destination_address = destination_address
 
-                    print(
+                    """print(
                         "set sending uniflow "
                         + str(uuniflow.uniflow_id)
                         + " source address: ",
@@ -811,7 +826,7 @@ class QuicConnection:
                         + str(uuniflow.uniflow_id)
                         + " destination address: ",
                         (dump_address(uuniflow.destination_address)),
-                    )
+                    )"""
 
                     builder = QuicPacketBuilder(
                         host_cid=self._receiving_uniflows[0].cid,
@@ -855,7 +870,7 @@ class QuicConnection:
                     ret.extend(ret_unused)
 
             # use active sending uniflows
-            builders: Dict[int, QuicPacketBuilder] = {}
+            builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]] = {}
             for auniflow in active_uniflows:
                 builder = QuicPacketBuilder(
                     host_cid=self._receiving_uniflows[0].cid,
@@ -885,20 +900,18 @@ class QuicConnection:
                         - auniflow.destination_address.bytes_sent
                     )
 
-                builders[auniflow.uniflow_id] = builder
+                builders[auniflow.uniflow_id] = (auniflow, builder)
 
             try:
                 if not self._handshake_confirmed:
                     for epoch in [tls.Epoch.INITIAL, tls.Epoch.HANDSHAKE]:
-                        self._write_handshake(builders[0], epoch, now)
-                self._write_application(builders, now)
+                        self._write_handshake(builders[0][1], epoch, now)
+                builders = self._write_application(builders, now)
             except QuicPacketBuilderStop:
                 pass
 
             # flush all builders
-            for uniflow_id, builder in builders.items():
-                auniflow = self._sending_uniflows[uniflow_id]
-
+            for uniflow_id, (auniflow, builder) in builders.items():
                 datagrams, packets = builder.flush()
 
                 if datagrams:
@@ -972,7 +985,7 @@ class QuicConnection:
                     ),
                 )
             )
-            # print("sending on uniflow ", selected_uniflow.uniflow_id, "from", ret[-1][2], "to", ret[-1][1])
+            # print("sending on uniflow", selected_uniflow.uniflow_id, "from", ret[-1][2], "to", ret[-1][1])
 
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
@@ -1068,7 +1081,6 @@ class QuicConnection:
         :param local_addr: The network address on which the datagram was received
         :param now: The current time.
         """
-        # print("received from", addr, "on", local_addr)
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -1099,6 +1111,7 @@ class QuicConnection:
                         destination_cid_seq = connection_id.sequence_number
                         srecvuniflow = uniflow
                         break
+            # print("receiving on uniflow", srecvuniflow.uniflow_id, "from", addr, "to", local_addr)
             if self._is_client and destination_cid_seq is None:
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
@@ -2328,6 +2341,7 @@ class QuicConnection:
 
         found_uniflow.local_challenge = None
         found_uniflow.path_is_validated = True
+        found_uniflow.state = UniflowState.ACTIVE
 
     def _handle_ping_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -3126,7 +3140,6 @@ class QuicConnection:
             if suniflow.local_challenge == challenge:
                 suniflow.reset()
                 self.change_connection_id(suniflow.uniflow_id)
-                print("Uniflow " + str(suniflow.uniflow_id) + "path challenge timeout")
 
     def _on_ping_delivery(
         self, delivery: QuicDeliveryState, uids: Sequence[int]
@@ -3551,9 +3564,9 @@ class QuicConnection:
 
     def _write_application(
         self,
-        builders: Dict[int, QuicPacketBuilder],
+        builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]],
         now: float,
-    ) -> None:
+    ) -> Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]:
         crypto_stream: Optional[QuicStream] = None
         if self._cryptos[tls.Epoch.ONE_RTT].send.is_valid():
             crypto = self._cryptos[tls.Epoch.ONE_RTT]
@@ -3563,51 +3576,98 @@ class QuicConnection:
             crypto = self._cryptos[tls.Epoch.ZERO_RTT]
             packet_type = PACKET_TYPE_ZERO_RTT
         else:
-            return
-        # Todo: change this to handle all other uniflows
-        space = self._receiving_uniflows[0].receiving_spaces[tls.Epoch.ONE_RTT]
-        selected_uniflow = self._sending_uniflows[list(builders.keys())[0]]
-        builder = builders[selected_uniflow.uniflow_id]
+            return builders
 
-        while True:
-            # apply pacing, except if we have ACKs to send
-            if space.ack_at is None or space.ack_at >= now:
-                selected_uniflow.pacing_at = (
-                    selected_uniflow.loss._pacer.next_send_time(now=now)
-                )
-                if selected_uniflow.pacing_at is not None:
-                    break
-            builder.start_packet(packet_type, crypto)
+        self._builder_manager.start_manager(builders)
+        iruniflow = self._receiving_uniflows[0]
+
+        while self._builder_manager.length_active_builders() > 0:
+            paced_uniflows: List[int] = []
+            # fixme: apply a method to select the ack-sending uniflow(s)
+            chosen_ack_uniflow_id = list(self._builder_manager.builders.keys())[0]
+            ack_item = self._builder_manager.builders[chosen_ack_uniflow_id]
+            # chosen_ack_uniflow = ack_item[0]
+            chosen_ack_builder = ack_item[1]
+
+            # apply pacing for each uniflow, except for the ack-sending uniflow if we have acks to send
+            for item in self._builder_manager.builders.items():
+                uniflow_id = item[0]
+                auniflow = item[1][0]
+                # builder = item[1][1]
+                apply_pacing = True
+                if uniflow_id == chosen_ack_uniflow_id:
+                    for runiflow in self._receiving_uniflows.values():
+                        space = runiflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                        if space.ack_at is not None and space.ack_at <= now:
+                            apply_pacing = False
+
+                if apply_pacing:
+                    auniflow.pacing_at = auniflow.loss._pacer.next_send_time(now=now)
+                    if auniflow.pacing_at is not None:
+                        paced_uniflows.append(uniflow_id)
+                        if uniflow_id == chosen_ack_uniflow_id:
+                            chosen_ack_uniflow_id = -1
+                            # chosen_ack_uniflow = None
+                            chosen_ack_builder = None
+
+            # filter the uniflows that can't send at this time
+            for uniflow_id in paced_uniflows:
+                self._builder_manager.finish_builder(uniflow_id)
+
+            if self._builder_manager.length_active_builders() == 0:
+                break
+
+            # start a new packet for each uniflow
+            for item in self._builder_manager.builders.items():
+                # uniflow_id = item[0]
+                # auniflow = item[1][0]
+                builder = item[1][1]
+                builder.start_packet(packet_type, crypto)
 
             if self._handshake_complete:
                 # ACK
-                if space.ack_at is not None and space.ack_at <= now:
-                    self._write_ack_frame(builder=builder, space=space, now=now)
+                space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                if (
+                    space.ack_at is not None
+                    and space.ack_at <= now
+                    and chosen_ack_uniflow_id != -1
+                ):
+                    self._write_ack_frame(
+                        builder=chosen_ack_builder, space=space, now=now
+                    )
 
                 # HANDSHAKE_DONE
                 if self._handshake_done_pending:
-                    self._write_handshake_done_frame(builder=builder)
+                    item = self._builder_manager.get_builder()
+                    handshake_builder = item[1][1]
+                    self._write_handshake_done_frame(builder=handshake_builder)
                     self._handshake_done_pending = False
 
+                # PATH_CHALLENGE
                 # only perform these on sending uniflow 0
                 # Other uniflows should perform path challenges differently
-                if selected_uniflow.uniflow_id == 0:
-                    # PATH CHALLENGE
+                item = self._builder_manager.get_specific_builder(0)
+                if item is not None:
+                    selected_uniflow = item[1][0]
+                    challenge_builder = item[1][1]
                     if (
                         not selected_uniflow.path_is_validated
                         and selected_uniflow.local_challenge is None
                     ):
                         challenge = os.urandom(8)
                         self._write_path_challenge_frame(
-                            builder=builder, challenge=challenge, uniflow_id=0
+                            builder=challenge_builder, challenge=challenge, uniflow_id=0
                         )
                         selected_uniflow.local_challenge = challenge
 
-                # PATH RESPONSE
+                # PATH_RESPONSE
                 for runiflow in self._receiving_uniflows.values():
                     if runiflow.remote_challenge is not None:
+                        item = self._builder_manager.get_builder()
+                        response_builder = item[1][1]
                         self._write_path_response_frame(
-                            builder=builder, challenge=runiflow.remote_challenge
+                            builder=response_builder,
+                            challenge=runiflow.remote_challenge,
                         )
                     runiflow.remote_challenge = None
 
@@ -3615,25 +3675,33 @@ class QuicConnection:
                 riuniflow = self._receiving_uniflows[0]
                 for connection_id in riuniflow.cid_available:
                     if not connection_id.was_sent:
+                        item = self._builder_manager.get_builder()
+                        new_cid_builder = item[1][1]
                         self._write_new_connection_id_frame(
-                            builder=builder, connection_id=connection_id
+                            builder=new_cid_builder, connection_id=connection_id
                         )
 
                 # RETIRE_CONNECTION_ID
                 siuniflow = self._sending_uniflows[0]
                 while siuniflow.retire_connection_ids:
+                    item = self._builder_manager.get_builder()
+                    ret_cid_builder = item[1][1]
                     sequence_number = siuniflow.retire_connection_ids.pop(0)
                     self._write_retire_connection_id_frame(
-                        builder=builder, sequence_number=sequence_number
+                        builder=ret_cid_builder, sequence_number=sequence_number
                     )
+
+                # MP frames
                 if self._peer_mp_support and self._max_sending_uniflows_id is not None:
                     # MP_NEW_CONNECTION_ID
                     for runiflow in self._receiving_uniflows.values():
                         if runiflow.uniflow_id != 0:
                             for connection_id in runiflow.cid_available:
                                 if not connection_id.was_sent:
+                                    item = self._builder_manager.get_builder()
+                                    mp_new_cid_builder = item[1][1]
                                     self._write_mp_new_connection_id_frame(
-                                        builder=builder,
+                                        builder=mp_new_cid_builder,
                                         connection_id=connection_id,
                                         uniflow_id=runiflow.uniflow_id,
                                     )
@@ -3642,121 +3710,181 @@ class QuicConnection:
                     for suniflow in self._sending_uniflows.values():
                         if suniflow.uniflow_id != 0:
                             while suniflow.retire_connection_ids:
+                                item = self._builder_manager.get_builder()
+                                mp_ret_cid_builder = item[1][1]
                                 sequence_number = suniflow.retire_connection_ids.pop(0)
                                 self._write_mp_retire_connection_id_frame(
-                                    builder=builder,
+                                    builder=mp_ret_cid_builder,
                                     sequence_number=sequence_number,
                                     uniflow_id=suniflow.uniflow_id,
                                 )
+
                     # MP_ACK
-                    for runiflow in self._receiving_uniflows.values():
-                        if runiflow.uniflow_id != 0:
-                            mpspace = runiflow.receiving_spaces[tls.Epoch.ONE_RTT]
-                            if mpspace.ack_at is not None and mpspace.ack_at <= now:
-                                self._write_mp_ack_frame(
-                                    builder=builder,
-                                    space=mpspace,
-                                    now=now,
-                                    uniflow_id=runiflow.uniflow_id,
-                                )
+                    if chosen_ack_uniflow_id != -1:
+                        for runiflow in self._receiving_uniflows.values():
+                            if runiflow.uniflow_id != 0:
+                                mpspace = runiflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                                if mpspace.ack_at is not None and mpspace.ack_at <= now:
+                                    self._write_mp_ack_frame(
+                                        builder=chosen_ack_builder,
+                                        space=mpspace,
+                                        now=now,
+                                        uniflow_id=runiflow.uniflow_id,
+                                    )
 
                     # ADD_ADDRESS
                     for laddr in self._local_addresses.values():
                         if not laddr.was_sent:
+                            item = self._builder_manager.get_builder()
+                            add_addr_builder = item[1][1]
                             self._write_add_address_frame(
-                                builder=builder, address=laddr
+                                builder=add_addr_builder, address=laddr
                             )
 
                     # REMOVE_ADDRESS
                     while self._removed_addresses:
+                        item = self._builder_manager.get_builder()
+                        rem_addr_builder = item[1][1]
                         address_id = self._removed_addresses.pop(0)
                         self._write_remove_address_frame(
-                            builder=builder, address=self._local_addresses[address_id]
+                            builder=rem_addr_builder,
+                            address=self._local_addresses[address_id],
                         )
 
                     # UNIFLOWS
                     if self._uniflows_pending:
+                        item = self._builder_manager.get_builder()
+                        uniflows_builder = item[1][1]
                         self._uniflows_pending = False
                         self._write_uniflows_frame(
-                            builder=builder, sequence_number=self._uniflows_seq
+                            builder=uniflows_builder, sequence_number=self._uniflows_seq
                         )
 
                 # STREAMS_BLOCKED
                 if self._streams_blocked_pending:
                     if self._streams_blocked_bidi:
+                        item = self._builder_manager.get_builder()
+                        str_b_bidi_builder = item[1][1]
                         self._write_streams_blocked_frame(
-                            builder=builder,
+                            builder=str_b_bidi_builder,
                             frame_type=QuicFrameType.STREAMS_BLOCKED_BIDI,
                             limit=self._remote_max_streams_bidi,
                         )
                     if self._streams_blocked_uni:
+                        item = self._builder_manager.get_builder()
+                        str_b_uni_builder = item[1][1]
                         self._write_streams_blocked_frame(
-                            builder=builder,
+                            builder=str_b_uni_builder,
                             frame_type=QuicFrameType.STREAMS_BLOCKED_UNI,
                             limit=self._remote_max_streams_uni,
                         )
                     self._streams_blocked_pending = False
 
                 # MAX_DATA and MAX_STREAMS
-                self._write_connection_limits(builder=builder, space=space)
+                space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                self._write_connection_limits(space=space)
 
             # stream-level limits
             for stream in self._streams.values():
-                self._write_stream_limits(builder=builder, space=space, stream=stream)
+                stream_space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                self._write_stream_limits(
+                    builders=self._builder_manager.builders,
+                    space=stream_space,
+                    stream=stream,
+                )
 
             # PING (user-request)
             if self._ping_pending:
-                self._write_ping_frame(builder, self._ping_pending)
+                item = self._builder_manager.get_builder()
+                ping_builder = item[1][1]
+                self._write_ping_frame(ping_builder, self._ping_pending)
                 self._ping_pending.clear()
 
             # PING (probe)
-            if selected_uniflow.probe_pending:
-                self._write_ping_frame(builder, comment="probe")
-                selected_uniflow.probe_pending = False
+            for item in self._builder_manager.builders.items():
+                selected_uniflow = item[1][0]
+                probe_builder = item[1][1]
+                if selected_uniflow.probe_pending:
+                    self._write_ping_frame(probe_builder, comment="probe")
+                    selected_uniflow.probe_pending = False
 
             # CRYPTO
             if crypto_stream is not None and not crypto_stream.send_buffer_is_empty:
-                self._write_crypto_frame(
-                    builder=builder, space=space, stream=crypto_stream
+                item = self._builder_manager.get_builder()
+                crypto_builder = item[1][1]
+                crypto_space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                used_builder = self._write_crypto_frame(
+                    builder=crypto_builder, space=crypto_space, stream=crypto_stream
                 )
+                if not used_builder:
+                    self._builder_manager.restore_builder()
 
             # DATAGRAM
-            while self._datagrams_pending:
+            dgram_pot_builders: List[int] = []
+            for item in self._builder_manager.builders.items():
+                dgram_pot_builders.append(item[0])
+            while self._datagrams_pending and len(dgram_pot_builders) > 0:
+                item = self._builder_manager.get_specific_builder(dgram_pot_builders[0])
+                datagram_builder = item[1][1]
                 try:
                     self._write_datagram_frame(
-                        builder=builder,
+                        builder=datagram_builder,
                         data=self._datagrams_pending[0],
                         frame_type=QuicFrameType.DATAGRAM_WITH_LENGTH,
                     )
                     self._datagrams_pending.popleft()
                 except QuicPacketBuilderStop:
-                    break
+                    del dgram_pot_builders[0]
 
             # STREAM and RESET_STREAM
             for stream in self._streams.values():
                 if stream.reset_pending:
+                    item = self._builder_manager.get_builder()
+                    reset_str_builder = item[1][1]
                     self._write_reset_stream_frame(
-                        builder=builder,
+                        builder=reset_str_builder,
                         frame_type=QuicFrameType.RESET_STREAM,
                         stream=stream,
                     )
                 elif not stream.is_blocked and not stream.send_buffer_is_empty:
-                    self._remote_max_data_used += self._write_stream_frame(
-                        builder=builder,
-                        space=space,
-                        stream=stream,
-                        max_offset=min(
-                            stream._send_highest
-                            + self._remote_max_data
-                            - self._remote_max_data_used,
-                            stream.max_stream_data_remote,
-                        ),
-                    )
+                    str_pot_builders: List[int] = []
+                    for item in self._builder_manager.builders.items():
+                        str_pot_builders.append(item[0])
+                    while (
+                        not stream.is_blocked
+                        and not stream.send_buffer_is_empty
+                        and len(str_pot_builders) > 0
+                    ):
+                        item = self._builder_manager.get_specific_builder(
+                            str_pot_builders[0]
+                        )
+                        str_builder = item[1][1]
+                        str_space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
+                        data_used = self._write_stream_frame(
+                            builder=str_builder,
+                            space=str_space,
+                            stream=stream,
+                            max_offset=min(
+                                stream._send_highest
+                                + self._remote_max_data
+                                - self._remote_max_data_used,
+                                stream.max_stream_data_remote,
+                            ),
+                        )
+                        self._remote_max_data_used += data_used
+                        if data_used == 0:
+                            del str_pot_builders[0]
 
-            if builder.packet_is_empty:
-                break
-            else:
-                selected_uniflow.loss._pacer.update_after_send(now=now)
+            for uniflow_id, (auniflow, builder) in list(
+                self._builder_manager.builders.items()
+            ):
+                if builder.packet_is_empty:
+                    self._builder_manager.finish_builder(uniflow_id)
+                else:
+                    auniflow.loss._pacer.update_after_send(now=now)
+
+        builders = self._builder_manager.end_manager()
+        return builders
 
     def _write_handshake(
         self, builder: QuicPacketBuilder, epoch: tls.Epoch, now: float
@@ -3874,9 +4002,7 @@ class QuicConnection:
                 )
             )
 
-    def _write_connection_limits(
-        self, builder: QuicPacketBuilder, space: QuicReceivingPacketSpace
-    ) -> None:
+    def _write_connection_limits(self, space: QuicReceivingPacketSpace) -> None:
         """
         Raise MAX_DATA or MAX_STREAMS if needed.
         """
@@ -3889,7 +4015,9 @@ class QuicConnection:
                 limit.value *= 2
                 self._logger.debug("Local %s raised to %d", limit.name, limit.value)
             if limit.value != limit.sent:
-                buf = builder.start_frame(
+                item = self._builder_manager.get_builder()
+                max_builder = item[1][1]
+                buf = max_builder.start_frame(
                     limit.frame_type,
                     capacity=CONNECTION_LIMIT_FRAME_CAPACITY,
                     handler=self._on_connection_limit_delivery,
@@ -3900,7 +4028,7 @@ class QuicConnection:
 
                 # log frame
                 if self._quic_logger is not None:
-                    builder.quic_logger_frames.append(
+                    max_builder.quic_logger_frames.append(
                         self._quic_logger.encode_connection_limit_frame(
                             frame_type=limit.frame_type,
                             maximum=limit.value,
@@ -4147,7 +4275,7 @@ class QuicConnection:
 
     def _write_stream_limits(
         self,
-        builder: QuicPacketBuilder,
+        builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]],
         space: QuicReceivingPacketSpace,
         stream: QuicStream,
     ) -> None:
@@ -4169,23 +4297,26 @@ class QuicConnection:
                 stream.max_stream_data_local,
             )
         if stream.max_stream_data_local_sent != stream.max_stream_data_local:
-            buf = builder.start_frame(
-                QuicFrameType.MAX_STREAM_DATA,
-                capacity=MAX_STREAM_DATA_FRAME_CAPACITY,
-                handler=self._on_max_stream_data_delivery,
-                handler_args=(stream,),
-            )
-            buf.push_uint_var(stream.stream_id)
-            buf.push_uint_var(stream.max_stream_data_local)
-            stream.max_stream_data_local_sent = stream.max_stream_data_local
-
-            # log frame
-            if self._quic_logger is not None:
-                builder.quic_logger_frames.append(
-                    self._quic_logger.encode_max_stream_data_frame(
-                        maximum=stream.max_stream_data_local, stream_id=stream.stream_id
-                    )
+            for item in builders.items():
+                builder = item[1][1]
+                buf = builder.start_frame(
+                    QuicFrameType.MAX_STREAM_DATA,
+                    capacity=MAX_STREAM_DATA_FRAME_CAPACITY,
+                    handler=self._on_max_stream_data_delivery,
+                    handler_args=(stream,),
                 )
+                buf.push_uint_var(stream.stream_id)
+                buf.push_uint_var(stream.max_stream_data_local)
+                stream.max_stream_data_local_sent = stream.max_stream_data_local
+
+                # log frame
+                if self._quic_logger is not None:
+                    builder.quic_logger_frames.append(
+                        self._quic_logger.encode_max_stream_data_frame(
+                            maximum=stream.max_stream_data_local,
+                            stream_id=stream.stream_id,
+                        )
+                    )
 
     def _write_streams_blocked_frame(
         self, builder: QuicPacketBuilder, frame_type: QuicFrameType, limit: int
@@ -4421,3 +4552,93 @@ class QuicConnection:
                     active_sending_uniflows=usable_suniflows,
                 )
             )
+
+
+class BuilderManager:
+    """
+    A _write_application builder manager.
+
+    The class provides an interface to help the _write_application method in QuicConnection-class
+    This class implements a Round-Robin mechanism on frame-level
+    """
+
+    def __init__(self) -> None:
+        self._builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]] = {}
+        self._fin_builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]] = {}
+        self._selected_index: int = -1
+        self._active: bool = False
+
+    def start_manager(
+        self, builders: Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]
+    ) -> None:
+        """
+        Start the manager by loading the available buffers, along with related info
+
+        :param builders: The available builders for the current run of _write_application
+        """
+        self._builders = builders
+        self._fin_builders = {}
+        self._selected_index = -1
+        self._active = True
+
+    def length_active_builders(self) -> int:
+        return len(self._builders.items())
+
+    @property
+    def builders(self) -> Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]:
+        return self._builders
+
+    def finish_builder(self, uniflow_id: int) -> None:
+        """
+        Retire a certain builder from being used in the current run of _write_application
+        :param uniflow_id: The uniflow id to which the buffer is tied
+        """
+        assert self._active
+        item = self._builders[uniflow_id]
+        self._fin_builders[uniflow_id] = item
+        del self._builders[uniflow_id]
+
+    def get_builder(self) -> Tuple[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]:
+        """
+        Get the next builder based on the Round-Robin mechanism
+        """
+        assert self._active
+        self._selected_index += 1
+        if self._selected_index >= len(self._builders.keys()):
+            self._selected_index = 0
+        dict_key = list(self._builders.keys())[self._selected_index]
+        return dict_key, self._builders[dict_key]
+
+    def get_specific_builder(
+        self, uniflow_id: int
+    ) -> Optional[Tuple[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]]:
+        """
+        Get a specific builder to perform certain non Round-Robin based actions
+        :param uniflow_id the uniflow id to which te builder is tied
+        """
+        assert self._active
+        if uniflow_id in self._builders.keys():
+            return uniflow_id, self.builders[uniflow_id]
+        else:
+            return None
+
+    def restore_builder(self) -> None:
+        """
+        Undo the last action of the Round-Robin mechanism
+        """
+        assert self._active
+        self._selected_index -= 1
+        if self._selected_index < 0:
+            self._selected_index = len(self._builders.keys()) - 1
+
+    def end_manager(self) -> Dict[int, Tuple[QuicSendingUniflow, QuicPacketBuilder]]:
+        """
+        Reset all the private members and return all buffers as retired
+        """
+        assert len(self._builders.items()) == 0
+        self._builders = {}
+        builders = self._fin_builders
+        self._fin_builders = {}
+        self._selected_index = -1
+        self._active = False
+        return builders
