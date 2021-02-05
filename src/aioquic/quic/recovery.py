@@ -96,7 +96,7 @@ class QuicCongestionControl:
     New Reno congestion control.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, uniflow_id: int, congestion_windows_all: Dict[int, int]) -> None:
         self.bytes_in_flight = 0
         self.congestion_window = K_INITIAL_WINDOW
         self._congestion_recovery_start_time = 0.0
@@ -160,8 +160,10 @@ class MPQuicDummyCongestionControl(QuicCongestionControl):
     Keeps the congestion window and sshthresh the same.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, uniflow_id: int, congestion_windows_all: Dict[int, int]) -> None:
+        super().__init__(uniflow_id, congestion_windows_all)
+        self.congestion_windows_all = congestion_windows_all
+        self.congestion_windows_all[uniflow_id] = self.congestion_window
 
     def on_packet_acked(self, packet: QuicSentPacket) -> None:
         self.bytes_in_flight -= packet.sent_bytes
@@ -206,6 +208,8 @@ class QuicPacketRecovery:
         peer_completed_address_validation: bool,
         send_probe: Callable[[], None],
         cc_type: CCTYPE,
+        uniflow_id: int,
+        congestion_windows_all: Dict[int, int],
         quic_logger: Optional[QuicLoggerTrace] = None,
     ) -> None:
         self.max_ack_delay = 0.025
@@ -228,11 +232,17 @@ class QuicPacketRecovery:
 
         # congestion control
         if cc_type == CCTYPE.NEW_RENO:
-            self._cc = QuicCongestionControl()
+            self._cc = QuicCongestionControl(
+                uniflow_id=uniflow_id, congestion_windows_all=congestion_windows_all
+            )
         elif cc_type == CCTYPE.DUMMY:
-            self._cc = MPQuicDummyCongestionControl()
+            self._cc = MPQuicDummyCongestionControl(
+                uniflow_id=uniflow_id, congestion_windows_all=congestion_windows_all
+            )
         else:  # default
-            self._cc = QuicCongestionControl()
+            self._cc = QuicCongestionControl(
+                uniflow_id=uniflow_id, congestion_windows_all=congestion_windows_all
+            )
         self._pacer = QuicPacketPacer()
 
     @property

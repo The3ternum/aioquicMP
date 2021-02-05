@@ -11,7 +11,7 @@ class QuicLoggerTest(TestCase):
     def test_empty_trace(self):
         logger = QuicLogger()
         trace = logger.start_trace(is_client=True, odcid=bytes(8))
-        logger.end_trace(trace)
+        logger.end_trace(trace, True)
         self.assertEqual(
             logger.to_dict(),
             {

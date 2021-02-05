@@ -72,6 +72,8 @@ class QuicPacketRecoveryTest(TestCase):
             initial_rtt=0.1,
             peer_completed_address_validation=True,
             send_probe=send_probe,
+            uniflow_id=0,
+            congestion_windows_all={},
             cc_type=CCTYPE.NEW_RENO,
         )
         self.recovery.spaces = [

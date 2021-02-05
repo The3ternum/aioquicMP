@@ -347,7 +347,7 @@ class QuicLogger:
         self._traces.append(trace)
         return trace
 
-    def end_trace(self, trace: QuicLoggerTrace) -> None:
+    def end_trace(self, trace: QuicLoggerTrace, is_client: bool) -> None:
         assert trace in self._traces, "QuicLoggerTrace does not belong to QuicLogger"
 
     def to_dict(self) -> Dict[str, Any]:

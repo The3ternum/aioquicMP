@@ -31,7 +31,6 @@ def client_receive_context(client, receiving_uniflow: int = 0, epoch=tls.Epoch.O
         host_cid=client._receiving_uniflows[receiving_uniflow].cid,
         receiving_uniflow=client._receiving_uniflows[receiving_uniflow],
         perceived_address=client._receiving_uniflows[receiving_uniflow].source_address,
-        # perceived_address=client._perceived_remote_addresses[0],
         quic_logger_frames=[],
         time=asyncio.get_event_loop().time(),
     )
@@ -657,7 +656,7 @@ class QuicMPConnectionTest(TestCase):
                     [0, 1, 2, 3, 4, 5, 6, 7],
                 )
 
-    def test_handle_retire_connection_id_frame_invalid_sequence_number(self):
+    def test_mp_handle_retire_connection_id_frame_invalid_sequence_number(self):
         client_msui = 0
         server_msui = 1
         server_uniflow_id = 1
@@ -846,17 +845,117 @@ class QuicMPConnectionTest(TestCase):
                 + " id not allowed for this frame type",
             )
 
-    # Todo fix address tests
-    def test_mp_remove_address(self):
-        address_id = 1
+    def test_mp_handle_add_address_frame(self):
         with client_and_server() as (client, server):
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0])
+
+            buf = Buffer(capacity=100)
+            buf.push_uint8(20)  # port (16) and IPV4 (4) flags
+            buf.push_uint8(1)
+            buf.push_uint_var(0)
+            buf.push_uint8(0)  # fixed interface
+            buf.push_bytes(b"\x02\x03\x04\x05")  # "2.3.4.5"
+            buf.push_uint16(4444)
+            buf.seek(0)
+
+            # client receives ADD_ADDRESS
+            client._handle_add_address_frame(
+                client_receive_context(client),
+                QuicFrameType.ADD_ADDRESS,
+                buf,
+            )
+
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1])
+
+    def test_mp_handle_remove_address(self):
+        with client_and_server() as (client, server):
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0])
+
+            # add remote addresses for the client to use
+            addresses = [
+                {
+                    "address_id": 1,
+                    "ip_address": b"\x02\x03\x04\x05",
+                    "port": 4444,
+                },
+                {
+                    "address_id": 2,
+                    "ip_address": b"\x02\x03\x04\x05",
+                    "port": 4455,
+                },
+            ]
+            for address in addresses:
+
+                buf = Buffer(capacity=100)
+                buf.push_uint8(20)  # port (16) and IPV4 (4) flags
+                buf.push_uint8(address["address_id"])
+                buf.push_uint_var(0)
+                buf.push_uint8(0)  # fixed interface
+                buf.push_bytes(address["ip_address"])  # "2.3.4.5"
+                buf.push_uint16(address["port"])
+                buf.seek(0)
+
+                # client receives ADD_ADDRESS
+                client._handle_add_address_frame(
+                    client_receive_context(client),
+                    QuicFrameType.ADD_ADDRESS,
+                    buf,
+                )
+
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1, 2])
+
+            # remove an address
+            removed_address_id = 1
+            assert (
+                0
+                <= removed_address_id
+                <= max(address_ids(client._remote_addresses.values()))
+            )
+            buf = Buffer(capacity=100)
+            buf.push_uint8(removed_address_id)
+            buf.push_uint_var(1)
+            buf.seek(0)
+
+            # client receives REMOVE_ADDRESS
+            client._handle_remove_address_frame(
+                client_receive_context(client),
+                QuicFrameType.REMOVE_ADDRESS,
+                buf,
+            )
+
+            for i in range(len(address_ids(client._remote_addresses.values()))):
+                self.assertEqual(
+                    client._remote_addresses[i].is_enabled,
+                    True if i != removed_address_id else False,
+                )
+
+    def test_mp_add_address(self):
+        with client_and_server() as (client, server):
+            # server adds remote addresses for the client to use
             server.add_address("2.3.4.5", 4444, IPVersion.IPV4, IFType.FIXED)
             server.add_address("2.3.4.5", 4455, IPVersion.IPV4, IFType.FIXED)
+            self.assertEqual(address_ids(server._local_addresses.values()), [0, 1, 2])
             self.assertEqual(transfer(server, client), 1)
 
             self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1, 2])
 
-            # the server removes the second address, REMOVE_ADDRESS is sent
-            server.remove_address(address_id)
+    def test_mp_remove_address(self):
+        with client_and_server() as (client, server):
+            # server adds remote addresses for the client to use
+            server.add_address("2.3.4.5", 4444, IPVersion.IPV4, IFType.FIXED)
+            server.add_address("2.3.4.5", 4455, IPVersion.IPV4, IFType.FIXED)
+            self.assertEqual(address_ids(server._local_addresses.values()), [0, 1, 2])
             self.assertEqual(transfer(server, client), 1)
-            self.assertEqual(client._remote_addresses[address_id].is_enabled, False)
+
+            self.assertEqual(address_ids(client._remote_addresses.values()), [0, 1, 2])
+
+            # the server removes an address, REMOVE_ADDRESS is sent
+            removed_address_id = 1
+            server.remove_address(removed_address_id)
+            self.assertEqual(transfer(server, client), 1)
+
+            for i in range(len(address_ids(client._remote_addresses.values()))):
+                self.assertEqual(
+                    client._remote_addresses[i].is_enabled,
+                    True if i != removed_address_id else False,
+                )

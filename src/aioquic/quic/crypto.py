@@ -85,6 +85,7 @@ class CryptoContext:
                 crypto = next_key_phase(self)
 
         # payload protection
+        # print("packet length:", len(packet) - len(plain_header))
         payload = crypto.aead.decrypt(
             packet[len(plain_header) :], plain_header, packet_number
         )

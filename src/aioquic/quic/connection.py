@@ -277,6 +277,7 @@ class QuicSendingUniflow:
         uniflow_id: int,
         is_first: bool,
         configuration: QuicConfiguration,
+        congestion_windows_all: Dict[int, int],
         quic_logger: Optional[QuicLoggerTrace] = None,
     ) -> None:
         self.configuration: QuicConfiguration = configuration
@@ -309,6 +310,7 @@ class QuicSendingUniflow:
         # Performance metrics
         self.sending_spaces: Dict[tls.Epoch, QuicSendingPacketSpace] = {}
         self._quic_logger: Optional[QuicLoggerTrace] = quic_logger
+        self._congestion_windows_all: Dict[int, int] = congestion_windows_all
         self.loss: QuicPacketRecovery = QuicPacketRecovery(
             initial_rtt=configuration.initial_rtt,
             # peer completed address validation is only applicable on uniflow 0, the other uniflows are not symmetrical
@@ -316,6 +318,8 @@ class QuicSendingUniflow:
             if is_first
             else True,
             cc_type=configuration.cc_type,
+            uniflow_id=uniflow_id,
+            congestion_windows_all=congestion_windows_all,
             quic_logger=quic_logger,
             send_probe=self.send_probe,
         )
@@ -337,6 +341,8 @@ class QuicSendingUniflow:
             initial_rtt=self.configuration.initial_rtt,
             peer_completed_address_validation=not self.configuration.is_client,
             cc_type=self.configuration.cc_type,
+            uniflow_id=self.uniflow_id,
+            congestion_windows_all=self._congestion_windows_all,
             quic_logger=self._quic_logger,
             send_probe=self.send_probe,
         )
@@ -420,11 +426,14 @@ class QuicConnection:
         if self._is_client:
             self._receiving_uniflows[0].cid_available[0].stateless_reset_token = None
 
+        self._congestion_windows_all: Dict[int, int] = {}
+
         self._sending_uniflows: Dict[int, QuicSendingUniflow] = {
             0: QuicSendingUniflow(
                 uniflow_id=0,
                 is_first=True,
                 configuration=configuration,
+                congestion_windows_all=self._congestion_windows_all,
             )
         }
         self._local_ack_delay_exponent = 3
@@ -526,6 +535,8 @@ class QuicConnection:
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
 
+        self._MP = False  # Patch for pquic connection
+
         # frame handlers
         self.__frame_handlers = {
             0x00: (self._handle_padding_frame, EPOCHS("IH01")),
@@ -587,13 +598,30 @@ class QuicConnection:
         which needs to be sent.
         """
 
-        uniflow = self._sending_uniflows[uniflow_id]
-        if uniflow.cid_available:
-            # retire previous CID
-            self._retire_peer_cid(uniflow_id, uniflow.cid)
+        # Old version for normal connections
+        # uniflow = self._sending_uniflows[uniflow_id]
+        # if uniflow.cid_available:
+        #     # retire previous CID
+        #     self._retire_peer_cid(uniflow_id, uniflow.cid)
 
+        #     # assign new CID
+        #     self._consume_peer_cid(uniflow_id)
+
+        # Patch version for pquic connection
+
+        uniflow = self._sending_uniflows[uniflow_id]
+        # retire previous CID
+        self._retire_peer_cid(uniflow_id, uniflow.cid)
+
+        if uniflow.cid_available:
             # assign new CID
             self._consume_peer_cid(uniflow_id)
+        else:
+            # generate random CID that isn't an actual CID
+            uniflow.cid = QuicConnectionId(
+                cid=os.urandom(self.configuration.connection_id_length),
+                sequence_number=None,
+            )
 
     def add_address(
         self,
@@ -643,8 +671,9 @@ class QuicConnection:
                     suniflow.reset()
 
             # write uniflows frame to communicate state
-            self._uniflows_seq += 1
-            self._uniflows_pending = True
+            if not self._uniflows_pending:
+                self._uniflows_seq += 1
+                self._uniflows_pending = True
 
     def close(
         self,
@@ -701,6 +730,8 @@ class QuicConnection:
         assert perceived_local_address is not None, "local address must be known"
 
         self._perceived_remote_addresses = [perceived_remote_address]
+        perceived_remote_address.address_id = 0
+        self._remote_addresses[0] = perceived_remote_address
         self._set_initial_address(perceived_local_address)
         self._version = self._configuration.supported_versions[0]
         isenduniflow = self._sending_uniflows[0]
@@ -753,13 +784,16 @@ class QuicConnection:
                 suniflow.state == UniflowState.UNUSED
                 and suniflow.source_address is None
                 and suniflow.destination_address is None
-                and len(suniflow.cid_available) > 0
+                # and len(suniflow.cid_available) > 0  # Disable for PQUIC connection
+                and len(suniflow.cid_available) >= 0  # Patch for pquic connection
+                and suniflow.cid.sequence_number is not None
             ):
                 unused_uniflows.append(suniflow)
 
         # handle closing
         if self._close_pending:
             selected_uniflow = random.choice(active_uniflows)
+            # print("closing with uniflow", selected_uniflow.uniflow_id)
             builder = QuicPacketBuilder(
                 host_cid=self._receiving_uniflows[0].cid,
                 is_client=self._is_client,
@@ -805,13 +839,16 @@ class QuicConnection:
             # bind unused uniflows to addresses
             if (
                 self._state == QuicConnectionState.CONNECTED
-                and len(self._remote_addresses.keys()) > 1
+                and self._MP  # Patch for pquic connection
+                # and len(self._remote_addresses.keys()) > 1  # Disable for pquic connection
             ):
                 for uuniflow in unused_uniflows:
                     # set random source/destination addresses
                     rsaid = random.choice(list(self._local_addresses.keys()))
+                    rsaid = uuniflow.uniflow_id  # Patch for pquic connection
                     source_address = self._local_addresses[rsaid]
                     rdaid = random.choice(list(self._remote_addresses.keys()))
+                    rdaid = 0  # Patch for pquic connection
                     destination_address = self._remote_addresses[rdaid]
 
                     uuniflow.source_address = source_address
@@ -845,6 +882,7 @@ class QuicConnection:
                         packet_type = PACKET_TYPE_ONE_RTT
 
                         builder.start_packet(packet_type, crypto)
+                        # print("sending PATH_CHALLENGE over uniflow", uuniflow.uniflow_id)
                         uuniflow.local_challenge = os.urandom(8)
                         self._write_path_challenge_frame(
                             builder=builder,
@@ -864,9 +902,6 @@ class QuicConnection:
 
                     # return datagrams to send and the destination network address
                     ret_unused = self._couple_datagrams_to_address(datagrams, uuniflow)
-                    if len(ret_unused) > 0:
-                        self._uniflows_seq += 1
-                        self._uniflows_pending = True
                     ret.extend(ret_unused)
 
             # use active sending uniflows
@@ -908,6 +943,7 @@ class QuicConnection:
                         self._write_handshake(builders[0][1], epoch, now)
                 builders = self._write_application(builders, now)
             except QuicPacketBuilderStop:
+                print("exception during PacketBuilder")
                 pass
 
             # flush all builders
@@ -939,6 +975,7 @@ class QuicConnection:
                 sent_handshake = True
 
             # log packet
+            # print("su", selected_uniflow.uniflow_id, "packet", packet.packet_number)
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
                     category="transport",
@@ -948,7 +985,12 @@ class QuicConnection:
                             packet.packet_type
                         ),
                         "header": {
-                            "packet_number": str(packet.packet_number),
+                            "packet_number": str(
+                                (
+                                    packet.packet_number
+                                    + selected_uniflow.uniflow_id * 100000
+                                )
+                            ),
                             "packet_size": packet.sent_bytes,
                             "scid": dump_cid(self._receiving_uniflows[0].cid)
                             if is_long_header(packet.packet_type)
@@ -1015,16 +1057,19 @@ class QuicConnection:
                 for space in runiflow.receiving_spaces.values():
                     if space.ack_at is not None and space.ack_at < timer_at:
                         timer_at = space.ack_at
+                        # print("ack timer", runiflow.uniflow_id)
 
             # loss detection timer
             for suniflow in self._sending_uniflows.values():
                 suniflow.loss_at = suniflow.loss.get_loss_detection_time()
                 if suniflow.loss_at is not None and suniflow.loss_at < timer_at:
                     timer_at = suniflow.loss_at
+                    # print("loss timer", suniflow.uniflow_id)
 
                 # pacing timer
                 if suniflow.pacing_at is not None and suniflow.pacing_at < timer_at:
                     timer_at = suniflow.pacing_at
+                    # print("pacing timer", suniflow.uniflow_id)
 
         return timer_at
 
@@ -1037,6 +1082,7 @@ class QuicConnection:
 
         :param now: The current time.
         """
+        # print("timer being handled")
         # end of closing period or idle timeout
         if now >= self._close_at:
             if self._close_event is None:
@@ -1045,12 +1091,14 @@ class QuicConnection:
                     frame_type=None,
                     reason_phrase="Idle timeout",
                 )
+            # print("closing")
             self._close_end()
             return
 
         # loss detection timeout
         for suniflow in self._sending_uniflows.values():
             if suniflow.loss_at is not None and now >= suniflow.loss_at:
+                # print("timeout", suniflow.uniflow_id)
                 self._logger.debug(
                     "uniflow " + str(suniflow.uniflow_id) + " Loss detection triggered"
                 )
@@ -1081,6 +1129,7 @@ class QuicConnection:
         :param local_addr: The network address on which the datagram was received
         :param now: The current time.
         """
+        # print("datagram received on connection")
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -1129,6 +1178,7 @@ class QuicConnection:
                 and not self._version_negotiation_count
             ):
                 # version negotiation
+                # print("handling VERSION NEGOTIATION")
                 versions = []
                 while not buf.eof():
                     versions.append(buf.pull_uint32())
@@ -1207,7 +1257,7 @@ class QuicConnection:
                                 "frames": [],
                             },
                         )
-
+                    # print("handling RETRY")
                     self._sending_uniflows[0].cid.cid = header.source_cid
                     self._sending_uniflows[0].token = header.token
                     self._retry_count += 1
@@ -1228,8 +1278,10 @@ class QuicConnection:
                 assert (
                     header.packet_type == PACKET_TYPE_INITIAL
                 ), "first packet must be INITIAL"
+
                 self._perceived_remote_addresses = [perceived_remote_address]
                 perceived_remote_address.address_id = 0
+                self._remote_addresses[0] = perceived_remote_address
                 self._set_initial_address(perceived_local_address)
                 self._version = QuicProtocolVersion(header.version)
 
@@ -1272,7 +1324,9 @@ class QuicConnection:
                 plain_header, plain_payload, packet_number = crypto.decrypt_packet(
                     data[start_off:end_off], encrypted_off, space.expected_packet_number
                 )
+                # print("Packet number", packet_number)
             except KeyUnavailableError as exc:
+                print("key unavailable")
                 self._logger.debug(exc)
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
@@ -1282,6 +1336,7 @@ class QuicConnection:
                     )
                 continue
             except CryptoError as exc:
+                print("decrypt error:", exc.args[0])
                 self._logger.debug(exc)
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
@@ -1320,7 +1375,9 @@ class QuicConnection:
                             header.packet_type
                         ),
                         "header": {
-                            "packet_number": str(packet_number),
+                            "packet_number": str(
+                                (packet_number + srecvuniflow.uniflow_id * 100000)
+                            ),
                             "packet_size": end_off - start_off,
                             "dcid": dump_cid(header.destination_cid),
                             "scid": dump_cid(header.source_cid),
@@ -1463,6 +1520,7 @@ class QuicConnection:
                     space.largest_received_time = now
                 space.ack_queue.add(packet_number)
                 if is_ack_eliciting and space.ack_at is None:
+                    # print("setting ack_at")
                     space.ack_at = now + self._ack_delay
 
     def request_key_update(self) -> None:
@@ -1574,14 +1632,17 @@ class QuicConnection:
         End the close procedure.
         """
         self._close_at = None
-        for epoch in self._receiving_uniflows[0].receiving_spaces.keys():
-            self._discard_epoch(epoch)
+        for i in range(len(self._receiving_uniflows.values())):
+            for epoch in self._receiving_uniflows[i].receiving_spaces.keys():
+                self._discard_epoch(epoch)
         self._events.append(self._close_event)
         self._set_state(QuicConnectionState.TERMINATED)
 
         # signal log end
         if self._quic_logger is not None:
-            self._configuration.quic_logger.end_trace(self._quic_logger)
+            self._configuration.quic_logger.end_trace(
+                self._quic_logger, self._is_client
+            )
             self._quic_logger = None
 
     def _connect(self, now: float) -> None:
@@ -1615,6 +1676,7 @@ class QuicConnection:
         swap_address_id = address.address_id
         swap = self._local_addresses[0]
         address.address_id = 0
+        swap.address_id = swap_address_id
         self._local_addresses[0] = address
         self._local_addresses[swap_address_id] = swap
 
@@ -1863,6 +1925,7 @@ class QuicConnection:
         """
         Handle an ACK frame.
         """
+        # print("handling ACK")
         ack_rangeset, ack_delay_encoded = pull_ack_frame(buf)
         if frame_type == QuicFrameType.ACK_ECN:
             buf.pull_uint_var()
@@ -1897,6 +1960,7 @@ class QuicConnection:
         """
         Handle a CONNECTION_CLOSE frame.
         """
+        # print("handling CONNECTION_CLOSE")
         error_code = buf.pull_uint_var()
         if frame_type == QuicFrameType.TRANSPORT_CLOSE:
             frame_type = buf.pull_uint_var()
@@ -1932,6 +1996,7 @@ class QuicConnection:
         """
         Handle a CRYPTO frame.
         """
+        # print("handling CRYPTO")
         offset = buf.pull_uint_var()
         length = buf.pull_uint_var()
         if offset + length > UINT_VAR_MAX:
@@ -1967,6 +2032,7 @@ class QuicConnection:
                 not self._parameters_received
                 and self.tls.received_extensions is not None
             ):
+                # print("parse transport params")
                 for ext_type, ext_data in self.tls.received_extensions:
                     if ext_type == tls.ExtensionType.QUIC_TRANSPORT_PARAMETERS:
                         self._parse_transport_parameters(ext_data)
@@ -2010,6 +2076,7 @@ class QuicConnection:
         """
         Handle a DATA_BLOCKED frame.
         """
+        #  print("handling DATA_BLOCKED")
         limit = buf.pull_uint_var()
 
         # log frame
@@ -2024,6 +2091,7 @@ class QuicConnection:
         """
         Handle a DATAGRAM frame.
         """
+        # print("handling DATAGRAM")
         start = buf.tell()
         if frame_type == QuicFrameType.DATAGRAM_WITH_LENGTH:
             length = buf.pull_uint_var()
@@ -2056,6 +2124,7 @@ class QuicConnection:
         """
         Handle a HANDSHAKE_DONE frame.
         """
+        # print("handling HANDSHAKE_DONE")
         # log frame
         if self._quic_logger is not None:
             context.quic_logger_frames.append(
@@ -2083,6 +2152,7 @@ class QuicConnection:
 
         This adjusts the total amount of we can send to the peer.
         """
+        # print("handling MAX_DATA")
         max_data = buf.pull_uint_var()
 
         # log frame
@@ -2105,6 +2175,7 @@ class QuicConnection:
 
         This adjusts the amount of data we can send on a specific stream.
         """
+        # print("handling MAX_STREAM_DATA")
         stream_id = buf.pull_uint_var()
         max_stream_data = buf.pull_uint_var()
 
@@ -2136,6 +2207,7 @@ class QuicConnection:
 
         This raises number of bidirectional streams we can initiate to the peer.
         """
+        # print("handling MAX_STREAMS_BIDI")
         max_streams = buf.pull_uint_var()
 
         # log frame
@@ -2159,6 +2231,7 @@ class QuicConnection:
 
         This raises number of unidirectional streams we can initiate to the peer.
         """
+        # print("handling MAX_STREAMS_UNI")
         max_streams = buf.pull_uint_var()
 
         # log frame
@@ -2180,6 +2253,7 @@ class QuicConnection:
         """
         Handle a NEW_CONNECTION_ID frame.
         """
+        # print("handling NEW_CONNECTION_ID")
         sequence_number = buf.pull_uint_var()
         retire_prior_to = buf.pull_uint_var()
         length = buf.pull_uint8()
@@ -2254,6 +2328,7 @@ class QuicConnection:
         """
         Handle a NEW_TOKEN frame.
         """
+        # print("handling NEW_TOKEN")
         length = buf.pull_uint_var()
         token = buf.pull_bytes(length)
 
@@ -2276,6 +2351,7 @@ class QuicConnection:
         """
         Handle a PADDING frame.
         """
+        # print("handling PADDING")
         # consume padding
         pos = buf.tell()
         for byte in buf.data_slice(pos, buf.capacity):
@@ -2294,6 +2370,7 @@ class QuicConnection:
         """
         Handle a PATH_CHALLENGE frame.
         """
+        # print("handling PATH_CHALLENGE")
         data = buf.pull_bytes(8)
 
         # log frame
@@ -2310,6 +2387,7 @@ class QuicConnection:
         """
         Handle a PATH_RESPONSE frame.
         """
+        # print("handling PATH_RESPONSE")
         data = buf.pull_bytes(8)
 
         # log frame
@@ -2342,6 +2420,10 @@ class QuicConnection:
         found_uniflow.local_challenge = None
         found_uniflow.path_is_validated = True
         found_uniflow.state = UniflowState.ACTIVE
+        # print("uniflow", found_uniflow.uniflow_id, "path validated")
+        if not self._uniflows_pending:
+            self._uniflows_seq += 1
+            self._uniflows_pending = True
 
     def _handle_ping_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2349,6 +2431,7 @@ class QuicConnection:
         """
         Handle a PING frame.
         """
+        # print("handling PING")
         # log frame
         if self._quic_logger is not None:
             context.quic_logger_frames.append(self._quic_logger.encode_ping_frame())
@@ -2359,6 +2442,7 @@ class QuicConnection:
         """
         Handle a RESET_STREAM frame.
         """
+        # print("handling RESET_STREAM")
         stream_id = buf.pull_uint_var()
         error_code = buf.pull_uint_var()
         final_size = buf.pull_uint_var()
@@ -2415,6 +2499,7 @@ class QuicConnection:
         """
         Handle a RETIRE_CONNECTION_ID frame.
         """
+        # print("handling RETIRE_CONNECTION_ID")
         sequence_number = buf.pull_uint_var()
 
         # log frame
@@ -2460,6 +2545,7 @@ class QuicConnection:
         """
         Handle a STOP_SENDING frame.
         """
+        # print("handling STOP_SENDING")
         stream_id = buf.pull_uint_var()
         error_code = buf.pull_uint_var()  # application error code
 
@@ -2482,6 +2568,7 @@ class QuicConnection:
         """
         Handle a STREAM frame.
         """
+        # print("handling STREAM")
         stream_id = buf.pull_uint_var()
         if frame_type & 4:
             offset = buf.pull_uint_var()
@@ -2545,6 +2632,7 @@ class QuicConnection:
         """
         Handle a STREAM_DATA_BLOCKED frame.
         """
+        # print("handling STREAM_DATA_BLOCKED")
         stream_id = buf.pull_uint_var()
         limit = buf.pull_uint_var()
 
@@ -2567,6 +2655,7 @@ class QuicConnection:
         """
         Handle a STREAMS_BLOCKED frame.
         """
+        # print("handling STREAMS_BLOCKED")
         limit = buf.pull_uint_var()
 
         # log frame
@@ -2584,6 +2673,7 @@ class QuicConnection:
         """
         Handle an MP_NEW_CONNECTION_ID frame.
         """
+        # print("handling MP_NEW_CONNECTION_ID")
         if not self._peer_mp_support:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2696,6 +2786,7 @@ class QuicConnection:
         """
         Handle an MP_RETIRE_CONNECTION_ID frame.
         """
+        # print("handling MP_RETIRE_CONNECTION_ID")
         if not self._peer_mp_support:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2774,6 +2865,7 @@ class QuicConnection:
         """
         Handle an MP_ACK frame.
         """
+        # print("handling MP_ACK")
         if not self._peer_mp_support:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2806,14 +2898,15 @@ class QuicConnection:
                 reason_phrase="Uniflow " + str(uniflow_id) + " does not exist",
             )
 
-        if uniflow_id == 0:
-            raise QuicConnectionError(
-                error_code=QuicErrorCode.PROTOCOL_VIOLATION,
-                frame_type=frame_type,
-                reason_phrase="Uniflow "
-                + str(uniflow_id)
-                + " id not allowed for this frame type",
-            )
+        # Patch for PQUIC  # Disable for pquic connection
+        # if uniflow_id == 0:
+        #    raise QuicConnectionError(
+        #        error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+        #        frame_type=frame_type,
+        #        reason_phrase="Uniflow "
+        #        + str(uniflow_id)
+        #        + " id not allowed for this frame type",
+        #    )
 
         suniflow = self._sending_uniflows[uniflow_id]
         # todo: don't check for peer completed address validation --> path response should do this
@@ -2830,6 +2923,7 @@ class QuicConnection:
             ack_delay=ack_delay,
             now=context.time,
         )
+        self._MP = True  # Patch for pquic connection
 
     def _handle_add_address_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2837,6 +2931,7 @@ class QuicConnection:
         """
         Handle an ADD_ADDRESS frame
         """
+        # print("handling ADD_ADDRESS")
         if not self._peer_mp_support:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2858,7 +2953,12 @@ class QuicConnection:
         )
         ip_bytes = buf.pull_bytes(length)
         ip_address = socket.inet_ntop(version, ip_bytes)
-        port = buf.pull_uint16() if first_byte & 16 else None
+        port = (
+            buf.pull_uint16()
+            if first_byte & 16
+            else context.receiving_uniflow.source_address.port
+            # based on MPTCP spec
+        )
 
         # log frame
         if self._quic_logger is not None:
@@ -2892,7 +2992,7 @@ class QuicConnection:
                     address = addr
 
             if address:
-                # update address
+                # update address info
                 address.address_id = address_id
                 address.ip_version = ip_version
                 address.interface_type = interface_type
@@ -2919,6 +3019,7 @@ class QuicConnection:
         """
         Handle a REMOVE_ADDRESS frame
         """
+        # print("handling REMOVE_ADDRESS")
         if not self._peer_mp_support:
             raise QuicConnectionError(
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2952,6 +3053,7 @@ class QuicConnection:
     def _handle_uniflows_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
     ) -> None:
+        # print("handling UNIFLOWS")
         """
         Handle a UNIFlOWS_ADDRESS frame
         """
@@ -3079,6 +3181,7 @@ class QuicConnection:
         """
         Log a key update.
         """
+        # print("key updated")
         if self._quic_logger is not None:
             self._quic_logger.log_event(
                 category="security",
@@ -3444,6 +3547,7 @@ class QuicConnection:
             if self._configuration.quantum_readiness_test
             else None,
             stateless_reset_token=runiflow.cid_available[0].stateless_reset_token,
+            max_udp_payload_size=1440,
         )
         if not self._is_client and (
             self._version >= QuicProtocolVersion.DRAFT_28
@@ -3551,6 +3655,7 @@ class QuicConnection:
                     uniflow_id=i,
                     is_first=False,
                     configuration=self.configuration,
+                    congestion_windows_all=self._congestion_windows_all,
                     quic_logger=self._quic_logger,
                 )
                 self._sending_uniflows[i].sending_spaces = {
@@ -3581,7 +3686,10 @@ class QuicConnection:
         self._builder_manager.start_manager(builders)
         iruniflow = self._receiving_uniflows[0]
 
+        # print("active builders:", self._builder_manager.length_active_builders())
+
         while self._builder_manager.length_active_builders() > 0:
+            # print("new loop")
             paced_uniflows: List[int] = []
             # fixme: apply a method to select the ack-sending uniflow(s)
             chosen_ack_uniflow_id = list(self._builder_manager.builders.keys())[0]
@@ -3617,6 +3725,8 @@ class QuicConnection:
             if self._builder_manager.length_active_builders() == 0:
                 break
 
+            # print("active builders after pacing:", self._builder_manager.length_active_builders())
+
             # start a new packet for each uniflow
             for item in self._builder_manager.builders.items():
                 # uniflow_id = item[0]
@@ -3632,6 +3742,7 @@ class QuicConnection:
                     and space.ack_at <= now
                     and chosen_ack_uniflow_id != -1
                 ):
+                    # print("sending ACK", 0, "over uniflow", chosen_ack_uniflow_id)
                     self._write_ack_frame(
                         builder=chosen_ack_builder, space=space, now=now
                     )
@@ -3639,6 +3750,7 @@ class QuicConnection:
                 # HANDSHAKE_DONE
                 if self._handshake_done_pending:
                     item = self._builder_manager.get_builder()
+                    # print("sending HANDSHAKE_DONE over uniflow", item[0])
                     handshake_builder = item[1][1]
                     self._write_handshake_done_frame(builder=handshake_builder)
                     self._handshake_done_pending = False
@@ -3654,6 +3766,7 @@ class QuicConnection:
                         not selected_uniflow.path_is_validated
                         and selected_uniflow.local_challenge is None
                     ):
+                        # print("sending PATH_CHALLENGE over uniflow", selected_uniflow.uniflow_id)
                         challenge = os.urandom(8)
                         self._write_path_challenge_frame(
                             builder=challenge_builder, challenge=challenge, uniflow_id=0
@@ -3664,6 +3777,7 @@ class QuicConnection:
                 for runiflow in self._receiving_uniflows.values():
                     if runiflow.remote_challenge is not None:
                         item = self._builder_manager.get_builder()
+                        # print("sending PATH_RESPONSE over uniflow", item[0])
                         response_builder = item[1][1]
                         self._write_path_response_frame(
                             builder=response_builder,
@@ -3676,6 +3790,7 @@ class QuicConnection:
                 for connection_id in riuniflow.cid_available:
                     if not connection_id.was_sent:
                         item = self._builder_manager.get_builder()
+                        # print("sending NEW_CONNECTION_ID over uniflow", item[0])
                         new_cid_builder = item[1][1]
                         self._write_new_connection_id_frame(
                             builder=new_cid_builder, connection_id=connection_id
@@ -3685,6 +3800,7 @@ class QuicConnection:
                 siuniflow = self._sending_uniflows[0]
                 while siuniflow.retire_connection_ids:
                     item = self._builder_manager.get_builder()
+                    # print("sending RETIRE_CONNECTION_ID over uniflow", item[0])
                     ret_cid_builder = item[1][1]
                     sequence_number = siuniflow.retire_connection_ids.pop(0)
                     self._write_retire_connection_id_frame(
@@ -3699,6 +3815,7 @@ class QuicConnection:
                             for connection_id in runiflow.cid_available:
                                 if not connection_id.was_sent:
                                     item = self._builder_manager.get_builder()
+                                    # print("sending MP_NEW_CONNECTION_ID over uniflow", item[0])
                                     mp_new_cid_builder = item[1][1]
                                     self._write_mp_new_connection_id_frame(
                                         builder=mp_new_cid_builder,
@@ -3711,6 +3828,7 @@ class QuicConnection:
                         if suniflow.uniflow_id != 0:
                             while suniflow.retire_connection_ids:
                                 item = self._builder_manager.get_builder()
+                                # print("sending MP_RETIRE_CONNECTION_ID over uniflow", item[0])
                                 mp_ret_cid_builder = item[1][1]
                                 sequence_number = suniflow.retire_connection_ids.pop(0)
                                 self._write_mp_retire_connection_id_frame(
@@ -3725,6 +3843,7 @@ class QuicConnection:
                             if runiflow.uniflow_id != 0:
                                 mpspace = runiflow.receiving_spaces[tls.Epoch.ONE_RTT]
                                 if mpspace.ack_at is not None and mpspace.ack_at <= now:
+                                    # print("sending MP_ACK", runiflow.uniflow_id, "over uniflow", chosen_ack_uniflow_id)
                                     self._write_mp_ack_frame(
                                         builder=chosen_ack_builder,
                                         space=mpspace,
@@ -3736,6 +3855,7 @@ class QuicConnection:
                     for laddr in self._local_addresses.values():
                         if not laddr.was_sent:
                             item = self._builder_manager.get_builder()
+                            # print("sending ADD_ADDRESS over uniflow", item[0])
                             add_addr_builder = item[1][1]
                             self._write_add_address_frame(
                                 builder=add_addr_builder, address=laddr
@@ -3744,6 +3864,7 @@ class QuicConnection:
                     # REMOVE_ADDRESS
                     while self._removed_addresses:
                         item = self._builder_manager.get_builder()
+                        # print("sending REMOVE_ADDRESS over uniflow", item[0])
                         rem_addr_builder = item[1][1]
                         address_id = self._removed_addresses.pop(0)
                         self._write_remove_address_frame(
@@ -3754,6 +3875,7 @@ class QuicConnection:
                     # UNIFLOWS
                     if self._uniflows_pending:
                         item = self._builder_manager.get_builder()
+                        # print("sending UNIFLOWS over uniflow", item[0])
                         uniflows_builder = item[1][1]
                         self._uniflows_pending = False
                         self._write_uniflows_frame(
@@ -3764,6 +3886,7 @@ class QuicConnection:
                 if self._streams_blocked_pending:
                     if self._streams_blocked_bidi:
                         item = self._builder_manager.get_builder()
+                        # print("sending STREAMS_BLOCKED_BIDI over uniflow", item[0])
                         str_b_bidi_builder = item[1][1]
                         self._write_streams_blocked_frame(
                             builder=str_b_bidi_builder,
@@ -3772,6 +3895,7 @@ class QuicConnection:
                         )
                     if self._streams_blocked_uni:
                         item = self._builder_manager.get_builder()
+                        # print("sending STREAMS_BLOCKED_UNI over uniflow", item[0])
                         str_b_uni_builder = item[1][1]
                         self._write_streams_blocked_frame(
                             builder=str_b_uni_builder,
@@ -3796,6 +3920,7 @@ class QuicConnection:
             # PING (user-request)
             if self._ping_pending:
                 item = self._builder_manager.get_builder()
+                # print("sending PING over uniflow", item[0])
                 ping_builder = item[1][1]
                 self._write_ping_frame(ping_builder, self._ping_pending)
                 self._ping_pending.clear()
@@ -3805,12 +3930,14 @@ class QuicConnection:
                 selected_uniflow = item[1][0]
                 probe_builder = item[1][1]
                 if selected_uniflow.probe_pending:
+                    # print("sending PROBE over uniflow", item[0])
                     self._write_ping_frame(probe_builder, comment="probe")
                     selected_uniflow.probe_pending = False
 
             # CRYPTO
             if crypto_stream is not None and not crypto_stream.send_buffer_is_empty:
                 item = self._builder_manager.get_builder()
+                # print("sending CRYPTO over uniflow", item[0])
                 crypto_builder = item[1][1]
                 crypto_space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
                 used_builder = self._write_crypto_frame(
@@ -3825,6 +3952,7 @@ class QuicConnection:
                 dgram_pot_builders.append(item[0])
             while self._datagrams_pending and len(dgram_pot_builders) > 0:
                 item = self._builder_manager.get_specific_builder(dgram_pot_builders[0])
+                # print("sending DATAGRAM over uniflow", item[0])
                 datagram_builder = item[1][1]
                 try:
                     self._write_datagram_frame(
@@ -3834,12 +3962,14 @@ class QuicConnection:
                     )
                     self._datagrams_pending.popleft()
                 except QuicPacketBuilderStop:
+                    # print("restore")
                     del dgram_pot_builders[0]
 
             # STREAM and RESET_STREAM
             for stream in self._streams.values():
                 if stream.reset_pending:
                     item = self._builder_manager.get_builder()
+                    # print("sending RESET_STREAM over uniflow", item[0])
                     reset_str_builder = item[1][1]
                     self._write_reset_stream_frame(
                         builder=reset_str_builder,
@@ -3858,6 +3988,7 @@ class QuicConnection:
                         item = self._builder_manager.get_specific_builder(
                             str_pot_builders[0]
                         )
+                        # print("sending STREAM over uniflow", item[0])
                         str_builder = item[1][1]
                         str_space = iruniflow.receiving_spaces[tls.Epoch.ONE_RTT]
                         data_used = self._write_stream_frame(
@@ -3872,6 +4003,7 @@ class QuicConnection:
                             ),
                         )
                         self._remote_max_data_used += data_used
+                        # print("stream data", data_used)
                         if data_used == 0:
                             del str_pot_builders[0]
 
@@ -3879,9 +4011,12 @@ class QuicConnection:
                 self._builder_manager.builders.items()
             ):
                 if builder.packet_is_empty:
+                    # print("builder", uniflow_id, "was empty")
                     self._builder_manager.finish_builder(uniflow_id)
                 else:
                     auniflow.loss._pacer.update_after_send(now=now)
+
+            # print("end loop")
 
         builders = self._builder_manager.end_manager()
         return builders
@@ -3905,6 +4040,7 @@ class QuicConnection:
 
             # ACK
             if space.ack_at is not None:
+                # print("sending ACK", 0, "over uniflow", 0)
                 self._write_ack_frame(builder=builder, space=space, now=now)
 
             # CRYPTO
@@ -3912,6 +4048,7 @@ class QuicConnection:
                 if self._write_crypto_frame(
                     builder=builder, space=space, stream=crypto_stream
                 ):
+                    # print("sending CRYPTO over uniflow", 0)
                     self._sending_uniflows[0].probe_pending = False
 
             # PING (probe)
@@ -3923,6 +4060,7 @@ class QuicConnection:
                     or not self._cryptos[tls.Epoch.HANDSHAKE].send.is_valid()
                 )
             ):
+                # print("sending PING over uniflow", 0)
                 self._write_ping_frame(builder, comment="probe")
                 self._sending_uniflows[0].probe_pending = False
 
@@ -4016,6 +4154,7 @@ class QuicConnection:
                 self._logger.debug("Local %s raised to %d", limit.name, limit.value)
             if limit.value != limit.sent:
                 item = self._builder_manager.get_builder()
+                # print("sending MAX_DATA/MAX_STREAMS over uniflow", item[0])
                 max_builder = item[1][1]
                 buf = max_builder.start_frame(
                     limit.frame_type,
@@ -4298,6 +4437,7 @@ class QuicConnection:
             )
         if stream.max_stream_data_local_sent != stream.max_stream_data_local:
             for item in builders.items():
+                # print("sending MAX_STREAM_DATA over uniflow", item[0])
                 builder = item[1][1]
                 buf = builder.start_frame(
                     QuicFrameType.MAX_STREAM_DATA,
@@ -4510,7 +4650,7 @@ class QuicConnection:
                 usable_runiflows.append(
                     {
                         "uniflow_id": runiflow.uniflow_id,
-                        "local_address_id": runiflow.source_address.address_id,
+                        "local_address_id": runiflow.destination_address.address_id,
                     }
                 )
                 frame_overhead += 8 + 1
@@ -4607,6 +4747,8 @@ class BuilderManager:
         if self._selected_index >= len(self._builders.keys()):
             self._selected_index = 0
         dict_key = list(self._builders.keys())[self._selected_index]
+        # print(self._builders.keys())
+        # print("id:", self._selected_index, "dict key:", dict_key)
         return dict_key, self._builders[dict_key]
 
     def get_specific_builder(
@@ -4627,6 +4769,7 @@ class BuilderManager:
         Undo the last action of the Round-Robin mechanism
         """
         assert self._active
+        # print("restored")
         self._selected_index -= 1
         if self._selected_index < 0:
             self._selected_index = len(self._builders.keys()) - 1

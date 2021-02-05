@@ -446,6 +446,8 @@ NON_IN_FLIGHT_FRAME_TYPES = frozenset(
         QuicFrameType.ACK_ECN,
         QuicFrameType.TRANSPORT_CLOSE,
         QuicFrameType.APPLICATION_CLOSE,
+        QuicFrameType.MP_ACK,
+        QuicFrameType.MP_ACK_ECN,
     ]
 )
 

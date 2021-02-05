@@ -88,6 +88,14 @@ class Server:
 
 SERVERS = [
     Server("pquic", "test.pquic.org", port=443, verify_mode=ssl.CERT_NONE),
+    Server(
+        "aioquicMP",
+        "localhost",
+        port=4433,
+        push_path="/",
+        structured_logging=True,
+        verify_mode=ssl.CERT_NONE,
+    ),
 ]
 
 

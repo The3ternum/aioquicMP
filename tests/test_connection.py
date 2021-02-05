@@ -415,8 +415,9 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1072])
+        self.assertEqual(datagram_sizes(items), [1280, 1076])
         # 4 bytes added to 1068 for new transport param
+        # 4 bytes added to 1072 for max_udp_payload_size
         self.assertAlmostEqual(server.get_timer(), 0.45)
         self.assertEqual(
             len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
@@ -498,8 +499,9 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1072])
+        self.assertEqual(datagram_sizes(items), [1280, 1076])
         # 4 bytes added to 1068 for new transport param
+        # 4 bytes added to 1072 for max_udp_payload_size
         self.assertEqual(server.get_timer(), 0.25)
         self.assertEqual(
             len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
@@ -543,8 +545,9 @@ class QuicConnectionTest(TestCase):
         now = server.get_timer()
         server.handle_timer(now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 896])
+        self.assertEqual(datagram_sizes(items), [1280, 900])
         # 4 bytes added to 892 for new transport param
+        # 4 bytes added to 896 for max_udp_payload_size
         self.assertAlmostEqual(server.get_timer(), 0.65)
         self.assertEqual(
             len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 0
@@ -618,8 +621,9 @@ class QuicConnectionTest(TestCase):
         now += TICK
         server.receive_datagram(items[0][0], CLIENT_ADDR, SERVER_ADDR, now=now)
         items = server.datagrams_to_send(now=now)
-        self.assertEqual(datagram_sizes(items), [1280, 1072])
+        self.assertEqual(datagram_sizes(items), [1280, 1076])
         # 4 bytes added to 1068 for new transport param
+        # 4 bytes added to 1072 for max_udp_payload_size
         self.assertEqual(server.get_timer(), 0.25)
         self.assertEqual(
             len(server._sending_uniflows[0].loss.spaces[0].sent_packets), 1
