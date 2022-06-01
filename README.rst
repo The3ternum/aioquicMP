@@ -24,6 +24,10 @@ aioquic
 .. |black| image:: https://img.shields.io/badge/code%20style-black-000000.svg
     :target: https://github.com/python/black
 
+Project discontinued
+--------------------
+This project has been discontinued as of february 2021
+
 ``MultiPath`` implementation
 ----------------------------
 This repository implements the Mutlipath Extension for quic in aioquic
